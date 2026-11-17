@@ -174,7 +174,13 @@ type GateDefinition struct {
 	// InputArtifacts limits the artifact types the gate can check (md|link).
 	// Empty means any. It is checked for entry gates against the input types
 	// declared by the stage.
-	InputArtifacts []ArtifactType `json:"input_artifacts,omitempty"`
+	//
+	// The field is deliberately excluded from JSON serialization (`json:"-"`):
+	// the artifact typing is part of the gate contract and validation, not of
+	// the immutable definition body. A published `id@version` was serialized
+	// without it, and its digest must not change when the contract learns the
+	// artifact types of the built-in gates (finding 3: digest immutability).
+	InputArtifacts []ArtifactType `json:"-"`
 	// Output is verdict (default) or artifact. Entry gates must be verdict-only.
 	Output GateOutput  `json:"output,omitempty"`
 	Params []GateParam `json:"params,omitempty"`

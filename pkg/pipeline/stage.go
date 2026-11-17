@@ -424,7 +424,25 @@ func (rs *runState) runStage(ctx context.Context, i int, name string) (r notifie
 			return fail(requestErr)
 		}
 		var executed stageexec.Result
-		executed, execErr = stageExecutor.Execute(stageCtx, request)
+		if templateStage, hasStage := rs.p.templateStage(name); hasStage {
+			entryResult, entryErr := rs.runEntryGuard(stageCtx, templateStage, attemptID, inputs, func(ctx context.Context) error {
+				executed, execErr = stageExecutor.Execute(ctx, request)
+				return nil
+			})
+			if entryErr != nil {
+				return fail(fmt.Errorf("агент %s: входные гейты: %w", name, entryErr))
+			}
+			if !entryResult.Allowed {
+				// A required entry gate failed, errored or waits: the executor
+				// must not have been called (finding 1).
+				r.ValidationFailed = true
+				return fail(fmt.Errorf("агент %s: входной гейт не пропустил этап: %s", name, entryResult.BlockReason()))
+			}
+		} else {
+			// A legacy (v4-style) graph stage has no template stage and therefore
+			// no entry gates: run the executor as before.
+			executed, execErr = stageExecutor.Execute(stageCtx, request)
+		}
 		r.ExecutorInfo = executorInfo(executed)
 		claimedVerdict = executed.Verdict
 		if errors.Is(execErr, stageexec.ErrTimeout) {

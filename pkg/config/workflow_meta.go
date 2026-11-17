@@ -254,20 +254,33 @@ func (c *Config) validateWorkflows(reg AgentLookup, add func(format string, args
 	for i := range workflows {
 		wf := &workflows[i]
 		prefix := fmt.Sprintf("workflows[%d] (%s)", i, wf.ID)
-		_, errs := lib.ResolveGateGroups(wf.EntryGateGroups, gatelib.GateContext{VerdictOnly: true})
-		for _, err := range errs {
-			add("%s: %v", prefix, err)
-		}
-		_, errs = lib.ResolveGroups(wf.ExitGateGroups, gatelib.StageContext{Lenient: true})
-		for _, err := range errs {
-			add("%s: %v", prefix, err)
-		}
-		c.validateChainConstraintsAt(reg, prefix, "entry_gate_groups", wf.EntryGateGroups, add)
-		c.validateChainConstraintsAt(reg, prefix, "exit_gate_groups", wf.ExitGateGroups, add)
+		// Resolve the full effective chain (inheritance, point overrides) and
+		// validate it as the controller will execute it: an override that names
+		// an unknown gate or version, drops a required parameter, or introduces
+		// a version conflict across the inheritance boundary must fail here,
+		// before a run starts (finding 5).
 		for _, entry := range []bool{true, false} {
-			if _, err := c.WorkflowGateGroups(wf.ID, entry); err != nil {
-				add("%s: %v", prefix, err)
+			field := "exit_gate_groups"
+			effective, err := c.resolveWorkflowGateGroups(wf.ID, entry, map[string]bool{})
+			if entry {
+				field = "entry_gate_groups"
 			}
+			if err != nil {
+				add("%s: %v", prefix, err)
+				continue
+			}
+			if entry {
+				_, errs := lib.ResolveGateGroups(effective, gatelib.GateContext{VerdictOnly: true})
+				for _, e := range errs {
+					add("%s: %v", prefix, e)
+				}
+			} else {
+				_, errs := lib.ResolveGroups(effective, gatelib.StageContext{Lenient: true})
+				for _, e := range errs {
+					add("%s: %v", prefix, e)
+				}
+			}
+			c.validateChainConstraintsAt(reg, prefix, field, effective, add)
 		}
 	}
 }
@@ -294,8 +307,11 @@ func (c *Config) resolveWorkflowGateGroups(id string, entry bool, visiting map[s
 	if parent == "" && wf.ID != DefaultWorkflowID {
 		parent = DefaultWorkflowID
 	}
+	if parent == wf.ID {
+		return nil, fmt.Errorf("workflow %s: extends ссылается на самого себя (%s); укажите другого родителя или удалите extends", id, id)
+	}
 	var base workflow.GateGroups
-	if parent != "" && parent != wf.ID {
+	if parent != "" {
 		var err error
 		base, err = c.resolveWorkflowGateGroups(parent, entry, visiting)
 		if err != nil {
@@ -364,19 +380,19 @@ func (c *Config) EntryGateGroupsFor(stage TemplateStage) (workflow.GateGroups, e
 	return merged, nil
 }
 
-// ExitGateGroupsFor is the exit counterpart of EntryGateGroupsFor. Stage-level
-// exit groups keep their historical precedence: workflow exit gates are
-// prepended, and same-name stage refs replace them.
+// ExitGateGroupsFor is the exit counterpart of EntryGateGroupsFor. It always
+// merges the active workflow's exit chain with the stage's own effective chain
+// (explicit exit_gate_groups or the legacy v5 translation): workflow exit gates
+// are prepended, and same-name stage refs replace them. A stage without an
+// explicit chain still receives the workflow's exit gates.
 func (c *Config) ExitGateGroupsFor(stage TemplateStage) (workflow.GateGroups, error) {
 	chain, err := c.WorkflowGateGroups(c.ActiveWorkflowID(), false)
 	if err != nil {
 		return nil, err
 	}
-	if len(stage.ExitGateGroups) == 0 {
-		return stage.EffectiveGateGroups(), nil
-	}
+	stageGroups := stage.EffectiveGateGroups()
 	overridden := map[string]bool{}
-	for _, group := range stage.ExitGateGroups {
+	for _, group := range stageGroups {
 		for _, ref := range group {
 			overridden[ref.InstanceName()] = true
 		}
@@ -393,11 +409,14 @@ func (c *Config) ExitGateGroupsFor(stage TemplateStage) (workflow.GateGroups, er
 			merged = append(merged, kept)
 		}
 	}
-	for _, group := range stage.ExitGateGroups {
+	for _, group := range stageGroups {
 		merged = append(merged, append(workflow.GateGroup(nil), group...))
 	}
 	if err := checkVersionConflicts(merged, "exit_gate_groups", "stage "+stage.ID); err != nil {
 		return nil, err
+	}
+	if errs := merged.ValidateShapeAt("exit_gate_groups"); len(errs) > 0 {
+		return nil, fmt.Errorf("stage %s: %w", stage.ID, joinErrors(errs))
 	}
 	return merged, nil
 }

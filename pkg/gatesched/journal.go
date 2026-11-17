@@ -168,6 +168,13 @@ func FoldAttempts(events []evidence.Event, key WaveKey) ([]workflow.GateAttempt,
 		if scope != key.Scope || attempt.Visit != key.Visit || attempt.ArtifactSHA256 != key.ArtifactSHA256 || attempt.TaskID != key.TaskID {
 			continue
 		}
+		// Entry and exit chains are distinct waves: an entry attempt of the same
+		// hash and gate name must never satisfy (or be reopened by) an exit wave,
+		// and vice versa. Old exit records with an empty phase keep matching the
+		// exit chain (finding 4).
+		if attempt.Phase.Effective() != key.Phase.Effective() {
+			continue
+		}
 		previous, seen := latest[attempt.AttemptID]
 		if !seen {
 			order = append(order, attempt.AttemptID)
@@ -315,7 +322,7 @@ func (m *MemoryJournal) Load(key WaveKey) ([]workflow.GateAttempt, error) {
 	var order []string
 	latest := map[string]workflow.GateAttempt{}
 	for _, rec := range m.records {
-		if rec.Type == RecordAborted || rec.Key != key {
+		if rec.Type == RecordAborted || !rec.Key.matches(key) {
 			continue
 		}
 		id := rec.Attempt.AttemptID

@@ -297,6 +297,75 @@ func (rs *runState) runGateWave(ctx context.Context, stage config.TemplateStage,
 	return waveOutcome{Result: res, Report: rs.waveReport(stage, state, res)}, nil
 }
 
+// runEntryGuard runs the entry chain of the stage over the resolved inputs and
+// calls execute only when every required entry gate passed. It is the production
+// caller of EntryGateGroupsFor and gatesched.GuardExecute: a required entry gate
+// that fails, errors or waits blocks the executor (finding 1). The wave is bound
+// to the hash of the resolved inputs and recorded with phase entry in the same
+// durable journal as the exit chain.
+func (rs *runState) runEntryGuard(ctx context.Context, stage config.TemplateStage, attemptID string, inputs []runtime.Artifact, execute gatesched.ExecuteFunc) (gatesched.EntryGateResult, error) {
+	groups, err := rs.p.cfg.EntryGateGroupsFor(stage)
+	if err != nil {
+		return gatesched.EntryGateResult{}, fmt.Errorf("этап %s: входные гейты: %w", stage.ID, err)
+	}
+	if len(groups) == 0 {
+		result := gatesched.EntryGateResult{Allowed: true}
+		if execute != nil {
+			if err := execute(ctx); err != nil {
+				return result, err
+			}
+		}
+		return result, nil
+	}
+	library := rs.p.cfg.GateLibrary()
+	definitions := map[string]workflow.GateDefinition{}
+	for _, ref := range groups.Refs() {
+		definition, err := library.Lookup(ref.Gate, ref.Version)
+		if err != nil {
+			return gatesched.EntryGateResult{}, fmt.Errorf("этап %s: %w", stage.ID, err)
+		}
+		definitions[ref.Key()] = definition
+	}
+	sha, err := resultVersionOf(inputs)
+	if err != nil {
+		return gatesched.EntryGateResult{}, fmt.Errorf("этап %s: хеш входов: %w", stage.ID, err)
+	}
+	synthetic := notifier.StageResult{AttemptID: attemptID, Outputs: inputs}
+	key := rs.waveKey(stage, synthetic, sha)
+	entryStage := entryRunnerStage(stage)
+	state := &waveState{hard: &hardWaveState{}, reports: map[string]stagecheck.Report{}}
+	runners := map[workflow.GateKind]gatesched.Runner{
+		workflow.GateKindBuiltin: rs.builtinGateRunner(entryStage, synthetic, state),
+		workflow.GateKindLLM:     rs.agentGateRunner(entryStage, synthetic, state),
+	}
+	external := rs.externalGateRunner(entryStage, synthetic)
+	runners[workflow.GateKindExternal] = external
+	runners[workflow.GateKindDocker] = external
+	scheduler, err := gatesched.New(rs.gateJournal(), runners, gatesched.Options{
+		MaxParallel: rs.p.cfg.GateConcurrency,
+		Clock:       func() time.Time { return rs.p.clock().UTC() },
+		Freezer:     resultFreezer{outputs: inputs},
+	})
+	if err != nil {
+		return gatesched.EntryGateResult{}, fmt.Errorf("планировщик входных гейтов этапа %s: %w", stage.ID, err)
+	}
+	return gatesched.GuardExecute(ctx, scheduler, gatesched.Wave{
+		Key: key, Groups: groups, Definitions: definitions,
+	}, execute)
+}
+
+// entryRunnerStage returns the stage the deterministic entry runners read: its
+// Result reflects the single declared input artifact type (md vs link), not the
+// stage output, so the code gates interpret the resolved inputs as the artifact
+// the entry chain checks (ARC-01). A stage without a single declared input type
+// keeps its own result type.
+func entryRunnerStage(stage config.TemplateStage) config.TemplateStage {
+	if len(stage.InputArtifacts) == 1 {
+		stage.Result = string(stage.InputArtifacts[0])
+	}
+	return stage
+}
+
 // builtinGateRunner executes the deterministic code gates.
 func (rs *runState) builtinGateRunner(stage config.TemplateStage, result notifier.StageResult, state *waveState) gatesched.Runner {
 	return gatesched.RunnerFunc(func(ctx context.Context, in gatesched.Invocation) gatesched.Outcome {

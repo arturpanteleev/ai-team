@@ -256,21 +256,61 @@ func (c *Config) validateGates(reg AgentLookup, add func(format string, args ...
 		// Entry gates are a v7 addition: they check declared input artifacts
 		// after the inputs are resolved and before the executor runs. They are
 		// verdict-only and share the same versioned library and group model.
-		if len(stage.EntryGateGroups) == 0 {
-			continue // workflow-level entry gates are checked in validateWorkflows
+		if len(stage.EntryGateGroups) > 0 {
+			if c.SchemaVersion < WorkflowSchemaVersion {
+				add("%s: входные гейты требуют schema_version %d; в v5/v6 entry_gate_groups и workflows недоступны", prefix, WorkflowSchemaVersion)
+			} else {
+				types := stage.InputArtifacts
+				if len(types) == 0 {
+					types = []workflow.ArtifactType{""} // no declared type: no artifact restriction
+				}
+				var entryErrs int
+				for _, artifact := range types {
+					ctx := gatelib.GateContext{Artifact: artifact, LinkKind: stage.LinkKind, VerdictOnly: true}
+					_, problems := lib.ResolveGateGroups(stage.EntryGateGroups, ctx)
+					for _, err := range problems {
+						detail := ""
+						if artifact != "" {
+							detail = fmt.Sprintf(" (вход %s)", artifact)
+						}
+						add("%s: %v%s", prefix, err, detail)
+					}
+					entryErrs += len(problems)
+				}
+				if entryErrs == 0 {
+					c.validateChainConstraintsAt(reg, prefix, "entry_gate_groups", stage.EntryGateGroups, add)
+				}
+			}
 		}
-		if c.SchemaVersion < WorkflowSchemaVersion {
-			add("%s: входные гейты требуют schema_version %d; в v5/v6 entry_gate_groups и workflows недоступны", prefix, WorkflowSchemaVersion)
-			continue
+
+		// Validate the effective merged chains (workflow + stage) exactly as the
+		// controller will execute them. Inheritance, overrides and the merge with
+		// the stage can move a human_approval out of the last group, add a second
+		// grill, or apply a workflow gate to an incompatible input; the declared
+		// chains above cannot see those (finding 5).
+		if c.SchemaVersion >= WorkflowSchemaVersion {
+			c.validateMergedStageChains(reg, lib, stage, prefix, add)
 		}
+	}
+}
+
+// validateMergedStageChains re-resolves and re-checks the effective entry and
+// exit chains of a stage after the workflow chain is merged in. EntryGateGroupsFor
+// and ExitGateGroupsFor already resolve inheritance, overrides and same-name
+// stage precedence and reject version conflicts and shape problems; this adds
+// the library (unknown gate, parameters, artifact applicability) and constraint
+// (human_approval position, grill count) checks on the merged result.
+func (c *Config) validateMergedStageChains(reg AgentLookup, lib *gatelib.Registry, stage TemplateStage, prefix string, add func(format string, args ...any)) {
+	if entryChain, err := c.EntryGateGroupsFor(stage); err != nil {
+		add("%s: %v", prefix, err)
+	} else if len(entryChain) > 0 {
 		types := stage.InputArtifacts
 		if len(types) == 0 {
-			types = []workflow.ArtifactType{""} // no declared type: no artifact restriction
+			types = []workflow.ArtifactType{""}
 		}
-		var entryErrs int
 		for _, artifact := range types {
 			ctx := gatelib.GateContext{Artifact: artifact, LinkKind: stage.LinkKind, VerdictOnly: true}
-			_, problems := lib.ResolveGateGroups(stage.EntryGateGroups, ctx)
+			_, problems := lib.ResolveGateGroups(entryChain, ctx)
 			for _, err := range problems {
 				detail := ""
 				if artifact != "" {
@@ -278,11 +318,13 @@ func (c *Config) validateGates(reg AgentLookup, add func(format string, args ...
 				}
 				add("%s: %v%s", prefix, err, detail)
 			}
-			entryErrs += len(problems)
 		}
-		if entryErrs == 0 {
-			c.validateChainConstraintsAt(reg, prefix, "entry_gate_groups", stage.EntryGateGroups, add)
-		}
+		c.validateChainConstraintsAt(reg, prefix, "entry_gate_groups", entryChain, add)
+	}
+	if exitChain, err := c.ExitGateGroupsFor(stage); err != nil {
+		add("%s: %v", prefix, err)
+	} else if len(exitChain) > 0 {
+		c.validateChainConstraintsAt(reg, prefix, "exit_gate_groups", exitChain, add)
 	}
 }
 

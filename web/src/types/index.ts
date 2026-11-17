@@ -121,10 +121,15 @@ export interface WorkflowApproval {
   roles: string[];
   quorum: 'any' | 'all';
   actions: Record<string, string>;
+  /** Confirmation deferred until the task's delivery decision. */
+  deferred?: boolean;
 }
 
 export interface WorkflowNode {
-  name: string;
+  /** Stable template stage key; the compiled graph emits `id`, older snapshots `name`. */
+  id?: string;
+  name?: string;
+  agent?: string;
   max_visits?: number;
 }
 
@@ -135,11 +140,35 @@ export interface WorkflowEdge {
   approval?: WorkflowApproval;
 }
 
+/** A backward route: returns live beside the compiled graph, not in its edges. */
+export interface GraphReturn {
+  from: string;
+  to: string;
+  max_visits?: number;
+}
+
 export interface WorkflowGraph {
   schema_version: number;
   entry: string;
   nodes: WorkflowNode[];
   edges: WorkflowEdge[];
+  returns?: GraphReturn[];
+}
+
+/**
+ * Read model of GET /api/graphs/{graphID} and GET /api/runs/{runID}/graph.
+ * `class` is a workflow's graph definition; `run` is the same graph pinned by
+ * one task, with the computed stage statuses and current position attached.
+ */
+export interface GraphView extends WorkflowGraph {
+  mode: 'class' | 'run';
+  graph_id?: string;
+  workflow_id?: string;
+  title?: string;
+  run_id?: string;
+  run_status?: string;
+  current_stage?: string;
+  stage_statuses?: StageStatusProjection;
 }
 
 export interface WorkflowSnapshot {

@@ -1,4 +1,5 @@
-import type { CreateTaskRequest, PipelineRun, Project, Stage, StageOwner, Artifact, Approval, ArtifactRevision, DeliveryProjection, LogTail, PreflightReport, TaskRunDetails, TaskGates, TaskRunEventsResponse, TaskRunFilters, TaskRunsResponse, TemplatesResponse, WorkflowSnapshot, Principal, ProjectTemplateResponse, TemplateValidation, TemplateVersion } from './types';
+import type { CreateTaskRequest, PipelineRun, Project, Stage, StageOwner, Artifact, Approval, ArtifactRevision, DeliveryProjection, GraphView, LogTail, PreflightReport, TaskRunDetails, TaskGates, TaskRunEventsResponse, TaskRunFilters, TaskRunsResponse, TemplatesResponse, WorkflowSnapshot, Principal, ProjectTemplateResponse, TemplateValidation, TemplateVersion } from './types';
+import type { WorkflowDetail, WorkflowsResponse } from './types/workflow';
 import type { FlowMetrics } from './types/flowMetrics';
 import type { RunTracker, TrackerDelivery, TrackerInbound, TrackerLink, TrackerOverview, TrackerSyncResult } from './types/tracker';
 
@@ -293,6 +294,26 @@ export function getRunLog(runId: string, attemptId: string): Promise<LogTail> {
 
 export function getRunWorkflow(runId: string): Promise<WorkflowSnapshot> {
   return fetchJson(`/runs/${encodeURIComponent(runId)}/workflow`);
+}
+
+// Граф: один и тот же контракт для страницы графа (класс) и страницы задачи
+// (прогон с вычисленными статусами этапов).
+export function getGraph(graphId: string): Promise<GraphView> {
+  return fetchJson(`/graphs/${encodeURIComponent(graphId)}`);
+}
+
+export function getRunGraph(runId: string): Promise<GraphView> {
+  return fetchJson(`/runs/${encodeURIComponent(runId)}/graph`);
+}
+
+// Каталог workflow: список карточек и карточка с графами, эффективными
+// entry/exit gate groups и связанными задачами.
+export function getWorkflows(): Promise<WorkflowsResponse> {
+  return fetchJson('/workflows');
+}
+
+export function getWorkflow(workflowId: string): Promise<WorkflowDetail> {
+  return fetchJson(`/workflows/${encodeURIComponent(workflowId)}`);
 }
 
 export function getProjectTemplate(): Promise<ProjectTemplateResponse> {

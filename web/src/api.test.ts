@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { confirmTaskStage, decideApproval, downloadFlowMetricsCsv, getActivePrincipal, getAuthConfig, getFlowMetrics, getGlobalEvents, getTaskFlowMetrics, getPreflight, getRunLog, getRunWorkflow, isAuthenticationRequired, openSession, patchWorkflowProcessYAML, startRun, updateWorkflowProcess } from './api';
+import { confirmTaskStage, decideApproval, downloadFlowMetricsCsv, getActivePrincipal, getAuthConfig, getFlowMetrics, getGlobalEvents, getTaskFlowMetrics, getPreflight, getRunLog, getRunWorkflow, isAuthenticationRequired, openSession, startRun, updateWorkflowProcess } from './api';
 import type { Approval } from './types';
 
 describe('write API client', () => {
@@ -213,80 +213,62 @@ describe('flow metrics API client', () => {
 });
 
 describe('workflow process edits (WF-06)', () => {
-  const configYAML = `schema_version: 7
-template: graph-api
-title: Graph API
-workflow: idea-to-prod
-workflows:
-  - id: idea-to-prod
-    title: SDLC
-    description: Standard flow
-    version: 3
-    graphs:
-      - id: sdlc
-        title: SDLC graph
-        template: graph-api
-    entry_gate_groups:
-      - [verdict_marker@1]
-  - id: content-factory
-    title: Content
-    version: 2
-    extends: idea-to-prod
-stages:
-  - id: spec
-    title: Spec
-    function: po
-    result: md
-`;
+  const templateVersion = 'b'.repeat(64);
+  const nextVersion = 'c'.repeat(64);
+  const templateResponse = JSON.stringify({
+    template: { yaml: 'schema_version: 7\n', version: templateVersion }, versions: [],
+  });
+  const patchURL = '/api/workflows/idea-to-prod/process';
 
   afterEach(() => {
     vi.unstubAllGlobals();
   });
 
-  it('patches only the chosen workflow process fields', () => {
-    const patched = patchWorkflowProcessYAML(configYAML, 'idea-to-prod', {
-      title: 'SDLC v2', description: 'Новое описание: "кавычки"',
-    });
-    expect(patched).toContain('  - id: idea-to-prod\n    title: "SDLC v2"\n    description: "Новое описание: \\"кавычки\\""');
-    // Соседний workflow, граф и гейты не тронуты.
-    expect(patched).toContain('  - id: content-factory\n    title: Content\n');
-    expect(patched).toContain('      - id: sdlc\n        title: SDLC graph\n');
-    expect(patched).toContain('      - [verdict_marker@1]');
-    expect(patched).toContain('stages:\n  - id: spec\n    title: Spec\n');
-  });
-
-  it('inserts a missing description and keeps no-op edits byte-identical', () => {
-    const patched = patchWorkflowProcessYAML(configYAML, 'content-factory', { description: 'Новый поток' });
-    expect(patched).toContain('    extends: idea-to-prod\n    description: "Новый поток"\n');
-    expect(patchWorkflowProcessYAML(configYAML, 'idea-to-prod', { title: 'SDLC' })).toBe(configYAML);
-  });
-
-  it('refuses a workflow that is not declared in the config', () => {
-    expect(() => patchWorkflowProcessYAML(configYAML, 'no-such-workflow', { title: 'x' })).toThrow(/не найден/);
-    expect(() => patchWorkflowProcessYAML('title: no workflows\n', 'idea-to-prod', { title: 'x' })).toThrow(/блока workflows/);
-  });
-
-  it('publishes the patched YAML against the version that was loaded', async () => {
-    const version = 'b'.repeat(64);
-    const nextVersion = 'c'.repeat(64);
-    // The CSRF token may already be cached from earlier tests, so answer by URL
-    // instead of assuming a fixed call sequence.
+  it('отправляет структурированный patch, а не полный YAML', async () => {
+    // The CSRF token may already be cached from earlier tests, so answer by URL.
     const fetchMock = vi.fn((url: string, _init?: RequestInit) => {
       const path = String(url);
-      if (path.includes('/template/publish')) return Promise.resolve(new Response(JSON.stringify({ version: nextVersion }), { status: 200 }));
       if (path.includes('session')) return Promise.resolve(new Response(JSON.stringify({ csrf_token: 'csrf-wf' }), { status: 200 }));
-      return Promise.resolve(new Response(JSON.stringify({ template: { yaml: configYAML, version }, versions: [] }), { status: 200 }));
+      if (path === '/api/template') return Promise.resolve(new Response(templateResponse, { status: 200 }));
+      if (path === patchURL) return Promise.resolve(new Response(JSON.stringify({ version: nextVersion, workflow_id: 'idea-to-prod' }), { status: 200 }));
+      throw new Error(`unexpected fetch: ${path}`);
     });
     vi.stubGlobal('fetch', fetchMock);
 
-    await updateWorkflowProcess('idea-to-prod', { description: 'Описание из карточки' });
+    const result = await updateWorkflowProcess('idea-to-prod', { title: 'SDLC v2', description: 'Новое описание' });
 
-    expect(fetchMock.mock.calls[0][0]).toBe('/api/template');
-    const publish = fetchMock.mock.calls.find(([url]) => String(url).includes('/template/publish'));
-    if (!publish) throw new Error('publish was not called');
-    const body = JSON.parse(String((publish[1] as RequestInit).body)) as { yaml: string; expected_version: string };
-    expect(body.expected_version).toBe(version);
-    expect(body.yaml).toContain('description: "Описание из карточки"');
-    expect(body.yaml).toContain('    entry_gate_groups:\n      - [verdict_marker@1]');
+    expect(result).toEqual({ version: nextVersion, workflow_id: 'idea-to-prod' });
+    const patch = fetchMock.mock.calls.find(([url]) => String(url) === patchURL);
+    if (!patch) throw new Error('process patch was not called');
+    // Only the identifier, the two allow-listed fields and the optimistic
+    // version: no YAML document, no commands, gates, graphs or infrastructure.
+    expect(JSON.parse(String((patch[1] as RequestInit).body))).toEqual({
+      workflow_id: 'idea-to-prod',
+      title: 'SDLC v2',
+      description: 'Новое описание',
+      expected_version: templateVersion,
+    });
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/template/publish'))).toBe(false);
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/template/validate'))).toBe(false);
+  });
+
+  it('показывает code сервера в сообщении об отказе', async () => {
+    const serverError = 'шаблон, присланный через веб, может менять только процесс: гейт external_program запускает команду или контейнер, которых нет в файловом конфиге';
+    const fetchMock = vi.fn((url: string, _init?: RequestInit) => {
+      const path = String(url);
+      if (path.includes('session')) return Promise.resolve(new Response(JSON.stringify({ csrf_token: 'csrf-wf' }), { status: 200 }));
+      if (path === '/api/template') return Promise.resolve(new Response(templateResponse, { status: 200 }));
+      if (path === patchURL) return Promise.resolve(new Response(
+        JSON.stringify({ error: serverError, code: 'trusted_config_only' }),
+        { status: 400, headers: { 'Content-Type': 'application/json' } },
+      ));
+      throw new Error(`unexpected fetch: ${path}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    // F3: the real server puts the long text in `error` and the code in
+    // `code`; both must reach the user instead of a synthetic literal.
+    await expect(updateWorkflowProcess('idea-to-prod', { description: 'oslabit' }))
+      .rejects.toThrow(`trusted_config_only: ${serverError}`);
   });
 });

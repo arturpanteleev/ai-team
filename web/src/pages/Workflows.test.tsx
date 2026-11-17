@@ -118,14 +118,22 @@ describe('Workflow catalogue', () => {
     expect(updateWorkflowProcess).not.toHaveBeenCalled();
   });
 
-  it('показывает отказ trusted_config_only понятным сообщением', async () => {
-    updateWorkflowProcess.mockRejectedValueOnce(new Error('trusted_config_only: гейт файлового конфига нельзя убрать из веба'));
+  it('показывает реальный отказ сервера с кодом trusted_config_only', async () => {
+    // F3: mock the error the server actually sends: the long explanation in
+    // `error` and the machine code in `code`, joined by the API client.
+    const serverError = 'шаблон, присланный через веб (REST, MCP или страницу «Шаблон»), может менять только процесс ' +
+      'и только ужесточать forbid_self_approval, returns и max_visits; команды, образы, mounts и ' +
+      'инфраструктурные настройки должны совпадать с активным файловым конфигом: ' +
+      'workflows: гейт verdict_marker (verdict_marker@1) файлового конфига нельзя убрать или ослабить из веба';
+    updateWorkflowProcess.mockRejectedValueOnce(new Error(`trusted_config_only: ${serverError}`));
     renderAt('/workflows/idea-to-prod', [{ path: '/workflows/:workflowID', element: <WorkflowDetailPage /> }]);
 
     fireEvent.change(await screen.findByLabelText('Описание'), { target: { value: 'oslabit' } });
     fireEvent.click(screen.getByRole('button', { name: 'Сохранить' }));
 
-    expect(await screen.findByRole('alert')).toHaveTextContent('trusted_config_only');
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('trusted_config_only:');
+    expect(alert).toHaveTextContent('гейт verdict_marker (verdict_marker@1) файлового конфига нельзя убрать или ослабить из веба');
     expect(screen.queryByRole('status')).toBeNull();
   });
 });

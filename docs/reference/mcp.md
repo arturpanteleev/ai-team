@@ -301,6 +301,7 @@ codex exec "вызови ai-team whoami"
 | GET | `/api/runs/{runID}/graph` | `get_run_graph` |
 | GET | `/api/workflows` | `list_workflows` |
 | GET | `/api/workflows/{workflowID}` | `get_workflow` |
+| POST | `/api/workflows/{workflowID}/process` | `publish_template` (алиас: process-only патч карточки workflow) |
 | POST | `/api/runs` | `start_task` |
 | POST | `/api/runs/{runID}/resume` | `resume_task` |
 | POST | `/api/runs/{runID}/cancel` | `cancel_task` |

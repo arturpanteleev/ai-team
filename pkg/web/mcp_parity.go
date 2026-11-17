@@ -116,6 +116,11 @@ var mcpParityMatrix = []mcpRouteParity{
 	{Method: http.MethodGet, Pattern: "/api/runs/{runID}/graph", Tool: "get_run_graph"},
 	{Method: http.MethodGet, Pattern: "/api/workflows", Tool: "list_workflows"},
 	{Method: http.MethodGet, Pattern: "/api/workflows/{workflowID}", Tool: "get_workflow"},
+	// The workflow card's structured process patch publishes exactly the same
+	// new template version as publish_template, only through a narrow
+	// title/description allow-list; MCP clients use publish_template directly
+	// and never send commands, gates or graphs from the web.
+	{Method: http.MethodPost, Pattern: "/api/workflows/{workflowID}/process", Tool: "publish_template", Alias: true},
 
 	// --- Tasks: actions ---------------------------------------------------
 	{Method: http.MethodPost, Pattern: "/api/runs", Tool: "start_task"},

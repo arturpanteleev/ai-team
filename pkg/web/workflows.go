@@ -1,12 +1,19 @@
 package web
 
 import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/arturpanteleev/ai-team/pkg/cloudidentity"
 	"github.com/arturpanteleev/ai-team/pkg/config"
 	"github.com/arturpanteleev/ai-team/pkg/lifecycle"
+	"github.com/arturpanteleev/ai-team/pkg/strictjson"
 	"github.com/arturpanteleev/ai-team/pkg/workflow"
 )
 
@@ -140,6 +147,192 @@ func (s *Server) handleGetWorkflow(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSONResponse(w, http.StatusOK, detail)
+}
+
+// WF-06: the workflow card edits only the process fields of one workflow. The
+// browser never sends YAML and never sends commands, gates, graphs or other
+// infrastructure: it sends a structured patch (workflow_id, title,
+// description, expected_version). The server loads the active file
+// configuration itself, applies the allow-list to the chosen workflow's
+// title/description in memory and publishes a new version through the normal
+// TemplateStore path. Everything the patch does not mention is taken from the
+// server-loaded file and never from the request, including the command gates
+// that a whole-document publish would refuse (the F2 case).
+type workflowProcessPatch struct {
+	WorkflowID      string  `json:"workflow_id"`
+	Title           *string `json:"title,omitempty"`
+	Description     *string `json:"description,omitempty"`
+	ExpectedVersion string  `json:"expected_version"`
+}
+
+// disallowedWorkflowPatchField reports a key outside the tiny allow-list. It
+// is classified as trusted_config_only: the web may not even name a command,
+// gate, graph or another workflow in this request.
+type disallowedWorkflowPatchField struct{ name string }
+
+func (e *disallowedWorkflowPatchField) Error() string {
+	return fmt.Sprintf("process patch не принимает поле %q: команды, гейты, графы и другие workflow правятся только в файловом конфиге", e.name)
+}
+
+func decodeWorkflowProcessPatch(w http.ResponseWriter, r *http.Request) (workflowProcessPatch, error) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxCommandBody)
+	data, err := io.ReadAll(r.Body)
+	if err != nil {
+		return workflowProcessPatch{}, err
+	}
+	// Decode once into keys to reject anything outside the allow-list with a
+	// domain code, then decode into the typed patch for value/type checks.
+	var keys map[string]json.RawMessage
+	if err := strictjson.Unmarshal(data, maxCommandBody, &keys); err != nil {
+		return workflowProcessPatch{}, err
+	}
+	for name := range keys {
+		switch name {
+		case "workflow_id", "title", "description", "expected_version":
+		default:
+			return workflowProcessPatch{}, &disallowedWorkflowPatchField{name: name}
+		}
+	}
+	var patch workflowProcessPatch
+	if err := strictjson.Unmarshal(data, maxCommandBody, &patch); err != nil {
+		return workflowProcessPatch{}, err
+	}
+	if patch.WorkflowID == "" {
+		return workflowProcessPatch{}, errors.New("workflow_id обязателен")
+	}
+	if len(patch.ExpectedVersion) != 64 {
+		return workflowProcessPatch{}, errors.New("expected_version должен быть SHA-256 hex")
+	}
+	return patch, nil
+}
+
+// handlePatchWorkflowProcess serves POST /api/workflows/{workflowID}/process.
+// It is the only write route of the workflow card; the read routes stay
+// read-only and the full /api/template/publish document route is untouched.
+func (s *Server) handlePatchWorkflowProcess(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "workflowID")
+	if !safeIdentity(id) {
+		writeJSONAPIError(w, http.StatusBadRequest, "invalid workflow id", "bad_identity")
+		return
+	}
+	if err := s.authorize(r, cloudidentity.PermissionTemplateEdit, ""); err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
+	patch, err := decodeWorkflowProcessPatch(w, r)
+	if err != nil {
+		var disallowed *disallowedWorkflowPatchField
+		if errors.As(err, &disallowed) {
+			writeJSONAPIError(w, http.StatusBadRequest, err.Error(), config.ErrCodeTrustedConfigOnly)
+			return
+		}
+		writeJSONAPIError(w, http.StatusBadRequest, err.Error(), "bad_request")
+		return
+	}
+	if patch.WorkflowID != id {
+		writeJSONAPIError(w, http.StatusBadRequest,
+			"process patch может менять только выбранный workflow: другой workflow правится в файловом конфиге",
+			config.ErrCodeTrustedConfigOnly)
+		return
+	}
+	if patch.Title != nil && strings.TrimSpace(*patch.Title) == "" {
+		writeJSONAPIError(w, http.StatusBadRequest, "title workflow не может быть пустым", "invalid_process_patch")
+		return
+	}
+	if patch.Description != nil && strings.ContainsAny(*patch.Description, "\r\n\x00") {
+		writeJSONAPIError(w, http.StatusBadRequest, "description не должен содержать управляющие символы", "invalid_process_patch")
+		return
+	}
+
+	s.templateMu.Lock()
+	defer s.templateMu.Unlock()
+
+	// The file is the authority for everything but the two fields above: it is
+	// loaded here, never taken from the request body.
+	store, err := s.templateStore()
+	if err != nil {
+		writeJSONAPIError(w, http.StatusInternalServerError, "template store unavailable", "template_store_unavailable")
+		return
+	}
+	current, currentVersion, err := store.ReadCurrent()
+	if err != nil {
+		writeJSONAPIError(w, http.StatusInternalServerError, "project template unavailable", "template_unavailable")
+		return
+	}
+	if patch.ExpectedVersion != currentVersion {
+		writeJSONAPIError(w, http.StatusConflict, "активный шаблон изменился: обновите страницу перед правкой", "version_conflict")
+		return
+	}
+	cfg, err := config.ParseYAML(current)
+	if err != nil {
+		writeJSONAPIError(w, http.StatusConflict, "workflow configuration unavailable", "config_unavailable")
+		return
+	}
+
+	var target *config.WorkflowMeta
+	for i := range cfg.Workflows {
+		if cfg.Workflows[i].ID == id {
+			target = &cfg.Workflows[i]
+			break
+		}
+	}
+	if target == nil {
+		// The synthesized default is not written in the file yet; materialize
+		// it before editing so the publication keeps the edited value.
+		for _, declared := range cfg.AllWorkflows() {
+			if declared.ID == id {
+				cfg.Workflows = append(cfg.Workflows, declared)
+				target = &cfg.Workflows[len(cfg.Workflows)-1]
+				break
+			}
+		}
+	}
+	if target == nil {
+		writeJSONAPIError(w, http.StatusNotFound, "workflow not found", "not_found")
+		return
+	}
+	if patch.Title != nil {
+		target.Title = *patch.Title
+	}
+	if patch.Description != nil {
+		target.Description = *patch.Description
+	}
+
+	// ParseYAML derives Confirm from Result for stages with no explicit gate
+	// chain. A v7 document must not carry that legacy key, so drop the derived
+	// spelling before re-rendering: the next parse derives it again from Result
+	// and the effective chain is unchanged.
+	if cfg.SchemaVersion >= config.WorkflowSchemaVersion {
+		for i := range cfg.Stages {
+			cfg.Stages[i].RequiredSections = nil
+			cfg.Stages[i].Check = nil
+			cfg.Stages[i].Confirm = ""
+		}
+	}
+
+	updated, err := cfg.Marshal()
+	if err != nil {
+		writeJSONAPIError(w, http.StatusInternalServerError, "не удалось сериализовать конфиг: "+err.Error(), "template_unavailable")
+		return
+	}
+	// Fail closed if the patch (or the round trip) produced an invalid config.
+	if _, _, err := s.parseTemplateYAML(updated); err != nil {
+		writeJSONAPIError(w, http.StatusBadRequest, "process patch сделал конфиг невалидным: "+err.Error(), "invalid_process_patch")
+		return
+	}
+	// Same pinning and provenance as a full publication: running tasks keep
+	// their version, the file baseline is saved and web-written bytes are
+	// registered (TemplateStore.Publish).
+	if err := s.pinUnversionedInFlightRuns(store, current); err != nil {
+		writeJSONAPIError(w, http.StatusInternalServerError, "не удалось закрепить версии текущих задач: "+err.Error(), "pin_failed")
+		return
+	}
+	version, err := store.Publish(updated, patch.ExpectedVersion)
+	if err != nil {
+		writeJSONAPIError(w, http.StatusConflict, err.Error(), "version_conflict")
+		return
+	}
+	writeJSONResponse(w, http.StatusOK, map[string]any{"version": version, "workflow_id": id})
 }
 
 // workflowTasks links the class to its objects: a run belongs to a workflow

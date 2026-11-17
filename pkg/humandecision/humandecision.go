@@ -14,7 +14,9 @@
 //     not voted in that role yet (a person votes once per role: with quorum
 //     all one person holding several required roles closes them one call per
 //     role);
-//  5. self-approval is forbidden when the pinned template says so;
+//  5. self-approval is forbidden when the pinned template says so (this
+//     includes a ReturnStage decision: returning a stage is a judgment on the
+//     same stage visit as confirming it);
 //  6. the decision is stored and an audit record names the actor, the role,
 //     the action, the hash and the channel.
 //
@@ -168,6 +170,15 @@ func IsTransition(value approval.PendingApproval) bool {
 		value.Trigger != "delivery_plan" && value.FromStage != "" && !value.Deferred
 }
 
+// selfApprovalSensitive reports whether action is a decision on the actor's own
+// work and must therefore pass the pinned forbid_self_approval policy.
+// ReturnStage resolves a return_to_* route on the stage being confirmed, so
+// those actions are covered alongside a plain confirmation. A rejection that
+// leaves the work with its author is not a confirmation and is not covered.
+func selfApprovalSensitive(action string) bool {
+	return action == "approve" || action == "approve_spec" || strings.HasPrefix(action, "return_to_")
+}
+
 // Decide applies the decision. See the package comment for the order of checks.
 func (s *Service) Decide(_ context.Context, req Request) (Result, error) {
 	if strings.TrimSpace(req.Actor.ID) == "" {
@@ -237,9 +248,14 @@ func (s *Service) Decide(_ context.Context, req Request) (Result, error) {
 		}
 		return Result{}, ErrRoleForbidden
 	}
-	if req.Action == "approve" || req.Action == "approve_spec" || strings.HasPrefix(req.Action, "return_to_") {
+	if selfApprovalSensitive(req.Action) {
 		if err := s.ports.SelfApprovalViolation(req.RunID, *pending, req.Actor.ID); err != nil {
 			// A violation and an unverifiable policy both refuse the decision.
+			// A return names its route in the refusal so the actor understands
+			// that the stage cannot be sent back to themselves.
+			if strings.HasPrefix(req.Action, "return_to_") {
+				return Result{}, fmt.Errorf("%w: возврат этапа действием %q его автором запрещён: %v", ErrSelfApproval, req.Action, err)
+			}
 			return Result{}, fmt.Errorf("%w: %v", ErrSelfApproval, err)
 		}
 	}

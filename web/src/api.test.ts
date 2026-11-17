@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { confirmTaskStage, decideApproval, downloadFlowMetricsCsv, getActivePrincipal, getAuthConfig, getFlowMetrics, getGlobalEvents, getTaskFlowMetrics, getPreflight, getRunLog, getRunWorkflow, isAuthenticationRequired, openSession, startRun } from './api';
+import { confirmTaskStage, decideApproval, downloadFlowMetricsCsv, getActivePrincipal, getAuthConfig, getFlowMetrics, getGlobalEvents, getTaskFlowMetrics, getPreflight, getRunLog, getRunWorkflow, isAuthenticationRequired, openSession, patchWorkflowProcessYAML, startRun, updateWorkflowProcess } from './api';
 import type { Approval } from './types';
 
 describe('write API client', () => {
@@ -209,5 +209,84 @@ describe('flow metrics API client', () => {
     )));
 
     await expect(downloadFlowMetricsCsv('2026-10-02', '2026-10-01')).rejects.toThrow('to must be later than from');
+  });
+});
+
+describe('workflow process edits (WF-06)', () => {
+  const configYAML = `schema_version: 7
+template: graph-api
+title: Graph API
+workflow: idea-to-prod
+workflows:
+  - id: idea-to-prod
+    title: SDLC
+    description: Standard flow
+    version: 3
+    graphs:
+      - id: sdlc
+        title: SDLC graph
+        template: graph-api
+    entry_gate_groups:
+      - [verdict_marker@1]
+  - id: content-factory
+    title: Content
+    version: 2
+    extends: idea-to-prod
+stages:
+  - id: spec
+    title: Spec
+    function: po
+    result: md
+`;
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('patches only the chosen workflow process fields', () => {
+    const patched = patchWorkflowProcessYAML(configYAML, 'idea-to-prod', {
+      title: 'SDLC v2', description: 'Новое описание: "кавычки"',
+    });
+    expect(patched).toContain('  - id: idea-to-prod\n    title: "SDLC v2"\n    description: "Новое описание: \\"кавычки\\""');
+    // Соседний workflow, граф и гейты не тронуты.
+    expect(patched).toContain('  - id: content-factory\n    title: Content\n');
+    expect(patched).toContain('      - id: sdlc\n        title: SDLC graph\n');
+    expect(patched).toContain('      - [verdict_marker@1]');
+    expect(patched).toContain('stages:\n  - id: spec\n    title: Spec\n');
+  });
+
+  it('inserts a missing description and keeps no-op edits byte-identical', () => {
+    const patched = patchWorkflowProcessYAML(configYAML, 'content-factory', { description: 'Новый поток' });
+    expect(patched).toContain('    extends: idea-to-prod\n    description: "Новый поток"\n');
+    expect(patchWorkflowProcessYAML(configYAML, 'idea-to-prod', { title: 'SDLC' })).toBe(configYAML);
+  });
+
+  it('refuses a workflow that is not declared in the config', () => {
+    expect(() => patchWorkflowProcessYAML(configYAML, 'no-such-workflow', { title: 'x' })).toThrow(/не найден/);
+    expect(() => patchWorkflowProcessYAML('title: no workflows\n', 'idea-to-prod', { title: 'x' })).toThrow(/блока workflows/);
+  });
+
+  it('publishes the patched YAML against the version that was loaded', async () => {
+    const version = 'b'.repeat(64);
+    const nextVersion = 'c'.repeat(64);
+    // The CSRF token may already be cached from earlier tests, so answer by URL
+    // instead of assuming a fixed call sequence.
+    const fetchMock = vi.fn((url: string, _init?: RequestInit) => {
+      const path = String(url);
+      if (path.includes('/template/publish')) return Promise.resolve(new Response(JSON.stringify({ version: nextVersion }), { status: 200 }));
+      if (path.includes('session')) return Promise.resolve(new Response(JSON.stringify({ csrf_token: 'csrf-wf' }), { status: 200 }));
+      return Promise.resolve(new Response(JSON.stringify({ template: { yaml: configYAML, version }, versions: [] }), { status: 200 }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await updateWorkflowProcess('idea-to-prod', { description: 'Описание из карточки' });
+
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/template');
+    const publish = fetchMock.mock.calls.find(([url]) => String(url).includes('/template/publish'));
+    if (!publish) throw new Error('publish was not called');
+    const body = JSON.parse(String((publish[1] as RequestInit).body)) as { yaml: string; expected_version: string };
+    expect(body.expected_version).toBe(version);
+    expect(body.yaml).toContain('description: "Описание из карточки"');
+    expect(body.yaml).toContain('    entry_gate_groups:\n      - [verdict_marker@1]');
   });
 });

@@ -1,16 +1,20 @@
-import { cleanup, render, screen, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Routes } from '../router';
 import type { WorkflowDetail, WorkflowsResponse } from '../types/workflow';
 import { WorkflowDetailPage, Workflows } from './Workflows';
 
-const { getWorkflows, getWorkflow } = vi.hoisted(() => ({
+const { getWorkflows, getWorkflow, getActivePrincipal, updateWorkflowProcess } = vi.hoisted(() => ({
   getWorkflows: vi.fn(),
   getWorkflow: vi.fn(),
+  getActivePrincipal: vi.fn(),
+  updateWorkflowProcess: vi.fn(),
 }));
 
-vi.mock('../api', () => ({ getWorkflows, getWorkflow }));
+vi.mock('../api', () => ({ getWorkflows, getWorkflow, getActivePrincipal, updateWorkflowProcess }));
+
+const editor = () => screen.getByRole('region', { name: 'Настройки workflow' });
 
 const list: WorkflowsResponse = {
   active_workflow_id: 'idea-to-prod',
@@ -44,6 +48,8 @@ describe('Workflow catalogue', () => {
     vi.clearAllMocks();
     getWorkflows.mockResolvedValue(list);
     getWorkflow.mockResolvedValue(detail);
+    getActivePrincipal.mockReturnValue({ actor_id: 'po@example.com', roles: ['product_owner'] });
+    updateWorkflowProcess.mockResolvedValue({ version: 'a'.repeat(64), workflow_id: 'idea-to-prod' });
   });
   afterEach(cleanup);
 
@@ -82,5 +88,44 @@ describe('Workflow catalogue', () => {
     renderAt('/workflows/missing', [{ path: '/workflows/:workflowID', element: <WorkflowDetailPage /> }]);
 
     expect(await screen.findByRole('alert')).toHaveTextContent('workflow not found');
+  });
+
+  it('сохраняет процессные поля и обновляет карточку', async () => {
+    renderAt('/workflows/idea-to-prod', [{ path: '/workflows/:workflowID', element: <WorkflowDetailPage /> }]);
+
+    const titleInput = await screen.findByLabelText('Название');
+    const descriptionInput = screen.getByLabelText('Описание');
+    fireEvent.change(titleInput, { target: { value: 'SDLC v2' } });
+    fireEvent.change(descriptionInput, { target: { value: 'Новое описание' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Сохранить' }));
+
+    await waitFor(() => expect(updateWorkflowProcess).toHaveBeenCalledWith('idea-to-prod', {
+      title: 'SDLC v2', description: 'Новое описание',
+    }));
+    expect(await screen.findByRole('status')).toHaveTextContent('сохранено');
+    expect(getWorkflow).toHaveBeenCalledTimes(2);
+    // Gate chains stay read-only: no gate controls are rendered anywhere.
+    expect(within(editor()).queryByLabelText(/гейт/i)).toBeNull();
+  });
+
+  it('без права template:edit не предлагает правку процессных полей', async () => {
+    getActivePrincipal.mockReturnValue({ actor_id: 'dev@example.com', roles: ['developer'] });
+    renderAt('/workflows/idea-to-prod', [{ path: '/workflows/:workflowID', element: <WorkflowDetailPage /> }]);
+
+    expect(await screen.findByLabelText('Название')).toBeDisabled();
+    expect(screen.getByLabelText('Описание')).toBeDisabled();
+    expect(screen.queryByRole('button', { name: 'Сохранить' })).toBeNull();
+    expect(updateWorkflowProcess).not.toHaveBeenCalled();
+  });
+
+  it('показывает отказ trusted_config_only понятным сообщением', async () => {
+    updateWorkflowProcess.mockRejectedValueOnce(new Error('trusted_config_only: гейт файлового конфига нельзя убрать из веба'));
+    renderAt('/workflows/idea-to-prod', [{ path: '/workflows/:workflowID', element: <WorkflowDetailPage /> }]);
+
+    fireEvent.change(await screen.findByLabelText('Описание'), { target: { value: 'oslabit' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Сохранить' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('trusted_config_only');
+    expect(screen.queryByRole('status')).toBeNull();
   });
 });

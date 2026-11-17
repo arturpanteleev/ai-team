@@ -316,6 +316,111 @@ export function getWorkflow(workflowId: string): Promise<WorkflowDetail> {
   return fetchJson(`/workflows/${encodeURIComponent(workflowId)}`);
 }
 
+// WF-06: правка процессных полей идёт через существующую публикацию
+// process-only шаблона. Клиент меняет в YAML только title/description выбранного
+// workflow; всё остальное (команды, гейты, графы, инфраструктура) остаётся
+// байт-в-байт. Сервер повторно проверяет весь документ и отвечает
+// trusted_config_only на любое ослабление или инфраструктурную правку.
+
+export type WorkflowProcessPatch = {
+  title?: string;
+  description?: string;
+};
+
+function yamlQuoted(value: string): string {
+  // JSON-строка — допустимый YAML double-quoted scalar (включая escape-последовательности).
+  return JSON.stringify(value);
+}
+
+function yamlScalarValue(raw: string): string {
+  const text = raw.trim();
+  if (text.startsWith('"') && text.endsWith('"')) {
+    try { return String(JSON.parse(text)); } catch { /* не разбирается — оставим как есть */ }
+  }
+  if (text.startsWith("'") && text.endsWith("'")) return text.slice(1, -1).replace(/''/g, "'");
+  return text;
+}
+
+function workflowFieldIndent(prefix: string): number {
+  return prefix.replace(/-\s+$/, '').length;
+}
+
+// patchWorkflowProcessYAML меняет только process-поля одного workflow в
+// исходном YAML. Возвращает тот же текст, если правки нет; не находит блок —
+// бросает ошибку, чтобы не Publish-ить непонятный документ.
+export function patchWorkflowProcessYAML(yaml: string, workflowID: string, patch: WorkflowProcessPatch): string {
+  const crlf = yaml.includes('\r\n');
+  const lines = (crlf ? yaml.replace(/\r\n/g, '\n') : yaml).split('\n');
+  const blockStart = lines.findIndex((line) => /^workflows\s*:/.test(line));
+  if (blockStart < 0) throw new Error('В конфиге нет блока workflows: правка процессных полей доступна только для объявленного workflow.');
+
+  let blockEnd = lines.length;
+  for (let i = blockStart + 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.trim() === '' || line.trimStart().startsWith('#')) continue;
+    if (!/^\s/.test(line)) { blockEnd = i; break; }
+  }
+
+  const starts: number[] = [];
+  for (let i = blockStart + 1; i < blockEnd; i++) {
+    if (/^ {2}-(?:\s|$)/.test(lines[i])) starts.push(i);
+  }
+  let itemStart = -1;
+  let itemEnd = blockEnd;
+  for (let k = 0; k < starts.length; k++) {
+    const start = starts[k];
+    const end = k + 1 < starts.length ? starts[k + 1] : blockEnd;
+    for (let i = start; i < Math.min(end, start + 6); i++) {
+      const match = /^(\s*(?:-\s+)?)(id)\s*:\s*(.+)$/.exec(lines[i]);
+      if (match && workflowFieldIndent(match[1]) <= 4 && yamlScalarValue(match[3]) === workflowID) {
+        itemStart = start;
+        itemEnd = end;
+        break;
+      }
+    }
+    if (itemStart >= 0) break;
+  }
+  if (itemStart < 0) throw new Error(`Workflow ${workflowID} не найден в конфиге.`);
+
+  for (const field of ['title', 'description'] as const) {
+    const value = patch[field];
+    if (value === undefined) continue;
+    let fieldLine = -1;
+    let prefix = '    ';
+    let existing = '';
+    for (let i = itemStart; i < itemEnd; i++) {
+      const match = /^(\s*(?:-\s+)?)(title|description)\s*:\s*(.*)$/.exec(lines[i]);
+      if (!match || match[2] !== field) continue;
+      const indent = workflowFieldIndent(match[1]);
+      if (indent === 2 || indent === 4) {
+        fieldLine = i;
+        prefix = match[1];
+        existing = match[3];
+        break;
+      }
+    }
+    if (fieldLine >= 0) {
+      if (yamlScalarValue(existing) === value) continue;
+      lines[fieldLine] = `${prefix}${field}: ${yamlQuoted(value)}`;
+    } else {
+      // Append at the end of this workflow's node so existing fields (and
+      // their order) stay untouched.
+      lines.splice(itemEnd, 0, `    ${field}: ${yamlQuoted(value)}`);
+      itemEnd++;
+    }
+  }
+  const result = lines.join('\n');
+  return crlf ? result.replace(/\n/g, '\r\n') : result;
+}
+
+export async function updateWorkflowProcess(workflowId: string, patch: WorkflowProcessPatch): Promise<{ version: string }> {
+  const current = await getProjectTemplate();
+  const yaml = current.template.yaml ?? '';
+  const updated = patchWorkflowProcessYAML(yaml, workflowId, patch);
+  if (updated === yaml) throw new Error('Изменений в процессных полях нет.');
+  return publishProjectTemplate(updated, current.template.version ?? '');
+}
+
 export function getProjectTemplate(): Promise<ProjectTemplateResponse> {
   return fetchJson('/template');
 }

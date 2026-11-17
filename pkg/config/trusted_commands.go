@@ -432,6 +432,20 @@ func hasAnyGateRef(refs []workflow.GateRef, ref workflow.GateRef) bool {
 	return false
 }
 
+// hasGateInstanceName reports whether refs contain a gate with the same
+// instance name as ref. A stage ref replaces a workflow gate by instance name
+// in the merged chain, so this catches a stage override that changes the
+// version or params of a workflow gate even when the full refs differ.
+func hasGateInstanceName(refs []workflow.GateRef, ref workflow.GateRef) bool {
+	name := ref.InstanceName()
+	for _, have := range refs {
+		if have.InstanceName() == name {
+			return true
+		}
+	}
+	return false
+}
+
 // workflowTightenProblems enforces the tighten-only semantics of the workflow
 // block (finding B), for publish and run alike:
 //
@@ -529,6 +543,7 @@ func stageMergedChain(cfg *Config, stage TemplateStage, entry bool) workflow.Gat
 // while workflow gates must hold for a run too (finding B).
 func stageMergedChainTightenProblems(submitted, trusted *Config, forRun bool) []string {
 	var problems []string
+	registry := gatelib.Default()
 	trustedStages := make(map[string]TemplateStage, len(trusted.Stages))
 	for _, stage := range trusted.Stages {
 		trustedStages[stage.ID] = stage
@@ -558,7 +573,20 @@ func stageMergedChainTightenProblems(submitted, trusted *Config, forRun bool) []
 			{"entry_gate_groups", stageMergedChain(trusted, wantStage, true), stageMergedChain(submitted, submittedStage, true), workflowEntry},
 		} {
 			for _, ref := range pair.want.Refs() {
-				if forRun && !hasAnyGateRef(pair.workflowRefs, ref) {
+				// Command gates (external_program, docker_program) are already
+				// refused/protected by workflowCommandGateProblems and the stage
+				// command-gate check; skip them here so name-only references to
+				// trusted command definitions stay accepted (as stageTightenProblems
+				// always did).
+				if isCommandGate(registry, ref) {
+					continue
+				}
+				// For a run only refs belonging to the trusted active workflow are
+				// protected (finding B). A stage ref replaces a workflow gate by
+				// instance name, so a stage override may use a different version or
+				// params; match by instance name, not the full ref, or a saved run
+				// could silently weaken the effective workflow gate (P2 from review).
+				if forRun && !hasGateInstanceName(pair.workflowRefs, ref) {
 					continue
 				}
 				if !hasGateRef(pair.have, ref) {

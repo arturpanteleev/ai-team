@@ -18,6 +18,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/config"
 	"github.com/arturpanteleev/ai-team/pkg/delivery"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
+	"github.com/arturpanteleev/ai-team/pkg/gatelib"
 	"github.com/arturpanteleev/ai-team/pkg/gatesched"
 	"github.com/arturpanteleev/ai-team/pkg/humanartifact"
 	"github.com/arturpanteleev/ai-team/pkg/logging"
@@ -27,6 +28,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
 	"github.com/arturpanteleev/ai-team/pkg/stagecheck"
 	"github.com/arturpanteleev/ai-team/pkg/ui"
+	"github.com/arturpanteleev/ai-team/pkg/workflow"
 )
 
 // stage_check.go — проверки результата этапа (B-40, §7). Вызываются из
@@ -37,6 +39,31 @@ import (
 const grillMode = "grill"
 
 const maxCheckReportBytes int64 = 8 << 20
+
+// automaticGateGroups returns the effective automatic exit chain of the stage:
+// the active workflow's exit gates merged with the stage's own chain (the chain
+// the scheduler executes, via ExitGateGroupsFor), minus human_approval, which is
+// the transition approval itself and is recorded by the human gate, not the
+// scheduler. Groups left empty by that are dropped.
+func (rs *runState) automaticGateGroups(stage config.TemplateStage) (workflow.GateGroups, error) {
+	groups, err := rs.p.cfg.ExitGateGroupsFor(stage)
+	if err != nil {
+		return nil, fmt.Errorf("этап %s: выходные гейты: %w", stage.ID, err)
+	}
+	var automatic workflow.GateGroups
+	for _, group := range groups {
+		var kept workflow.GateGroup
+		for _, ref := range group {
+			if ref.Gate != gatelib.GateHumanApproval {
+				kept = append(kept, ref)
+			}
+		}
+		if len(kept) > 0 {
+			automatic = append(automatic, kept)
+		}
+	}
+	return automatic, nil
+}
 
 // runStageChecks executes the stage's exit gate chain over the result of the
 // attempt that has just finished (pkg/gatesched runs the groups in order and
@@ -52,7 +79,10 @@ func (rs *runState) runStageChecks(ctx context.Context, stageID string, result n
 	if !ok {
 		return nil
 	}
-	groups := automaticGateGroups(stage)
+	groups, err := rs.automaticGateGroups(stage)
+	if err != nil {
+		return err
+	}
 	if len(groups) == 0 {
 		return nil
 	}
@@ -990,7 +1020,15 @@ func (rs *runState) applyCheckOverride(stageID string) (notifier.StageResult, er
 	stage, hasStage := rs.p.templateStage(stageID)
 	checkKind := applied.Kind
 	if checkKind == "" {
-		if !hasStage || len(automaticGateGroups(stage)) == 0 {
+		hasAutomatic := false
+		if hasStage {
+			groups, groupsErr := rs.automaticGateGroups(stage)
+			if groupsErr != nil {
+				return notifier.StageResult{}, groupsErr
+			}
+			hasAutomatic = len(groups) > 0
+		}
+		if !hasStage || !hasAutomatic {
 			return notifier.StageResult{}, fmt.Errorf("обход проверки: этап %s не имеет проверки", stageID)
 		}
 		checkKind = stageCheckKind(stage)

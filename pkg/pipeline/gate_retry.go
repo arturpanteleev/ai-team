@@ -223,7 +223,11 @@ func (rs *runState) overrideEvidence(stage config.TemplateStage, result notifier
 	if err != nil {
 		return nil, fmt.Errorf("чтение попыток гейтов для обхода %s: %w", stage.ID, err)
 	}
-	refs := automaticGateGroups(stage).Refs()
+	groups, err := rs.automaticGateGroups(stage)
+	if err != nil {
+		return nil, fmt.Errorf("выходные гейты этапа %s: %w", stage.ID, err)
+	}
+	refs := groups.Refs()
 	statuses, resolution := gatesched.Resolve(refs, nil, sha, attempts, nil)
 	var blocking []workflow.GateAttempt
 	for _, status := range statuses {

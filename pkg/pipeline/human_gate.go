@@ -8,6 +8,7 @@ import (
 
 	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/config"
+	"github.com/arturpanteleev/ai-team/pkg/gatelib"
 	"github.com/arturpanteleev/ai-team/pkg/gatesched"
 	"github.com/arturpanteleev/ai-team/pkg/notifier"
 	"github.com/arturpanteleev/ai-team/pkg/workflow"
@@ -42,7 +43,10 @@ const humanDecisionCommentLimit = 300
 // gate. The records are idempotent on the result version: a redelivered
 // resume or a re-entered transition does not add a second decision.
 func (rs *runState) recordHumanGate(stage config.TemplateStage, result notifier.StageResult, edgeTo, trigger, action string, decisionErr error) error {
-	ref, ok := stage.HumanGateRef()
+	ref, group, ok, err := rs.stageHumanGate(stage)
+	if err != nil {
+		return fmt.Errorf("этап %s: %w", stage.ID, err)
+	}
 	if !ok {
 		return nil
 	}
@@ -78,7 +82,6 @@ func (rs *runState) recordHumanGate(stage config.TemplateStage, result notifier.
 	if len(mine) > 0 {
 		latest = &mine[len(mine)-1]
 	}
-	group := humanGateGroup(stage, ref)
 	now := time.Now().UTC()
 
 	if waiting != nil {
@@ -120,16 +123,24 @@ func (rs *runState) recordHumanGate(stage config.TemplateStage, result notifier.
 	return journal.Record(gatesched.Record{Type: gatesched.RecordFinished, Key: key, Attempt: attempt})
 }
 
-// humanGateGroup is the index of the group of the chain that holds the gate.
-func humanGateGroup(stage config.TemplateStage, ref workflow.GateRef) int {
-	for index, group := range stage.EffectiveGateGroups() {
-		for _, candidate := range group {
-			if candidate.Key() == ref.Key() && candidate.InstanceName() == ref.InstanceName() {
-				return index
+// stageHumanGate returns the human_approval gate of the stage's effective exit
+// chain and the index of the group that holds it. The chain is the active
+// workflow's exit gates merged with the stage's own (ExitGateGroupsFor), so a
+// workflow-level human gate participates even when the stage declares no chain,
+// and the group index matches the chain the automatic gates ran in.
+func (rs *runState) stageHumanGate(stage config.TemplateStage) (ref workflow.GateRef, group int, ok bool, err error) {
+	groups, err := rs.p.cfg.ExitGateGroupsFor(stage)
+	if err != nil {
+		return workflow.GateRef{}, 0, false, err
+	}
+	for index, candidates := range groups {
+		for _, candidate := range candidates {
+			if candidate.Gate == gatelib.GateHumanApproval {
+				return candidate, index, true, nil
 			}
 		}
 	}
-	return 0
+	return workflow.GateRef{}, 0, false, nil
 }
 
 // humanGateVerdict maps the chosen action to the gate verdict and describes
@@ -197,7 +208,9 @@ func (rs *runState) recordResumedHumanDecision() error {
 	if !ok {
 		return nil
 	}
-	if _, has := stage.HumanGateRef(); !has {
+	if _, _, has, err := rs.stageHumanGate(stage); err != nil {
+		return err
+	} else if !has {
 		return nil
 	}
 	for i := len(rs.results) - 1; i >= 0; i-- {

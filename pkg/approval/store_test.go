@@ -304,6 +304,56 @@ func TestStoreExplainsForbiddenReturnRouteAndRequiresReason(t *testing.T) {
 	}
 }
 
+// ReturnStage decisions must stay ordinary role-bound approval decisions: the
+// self-approval policy is enforced upstream (pkg/humandecision), while the
+// store keeps the approver role and the separate system-administrator authority
+// intact so both remain auditable.
+func TestReturnDecisionPreservesRolesAndAdminAuthority(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := store.Create(PendingApproval{
+		RunID: "run-return-roles", AttemptID: "attempt-return", FromStage: "reviewer", ToStage: "coder",
+		Trigger: "graph_outcome:rejected", SubjectHash: testSubject,
+		RequiredRoles: []string{"reviewer"}, Actions: []string{"return_to_coder"}, FeedbackActions: []string{"return_to_coder"},
+		Targets: map[string]string{"return_to_coder": "coder"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := store.Decide(value.RunID, value.ID, Decision{
+		ActorID: "reviewer-2", ActorRole: "reviewer", Action: "return_to_coder",
+		SubjectHash: testSubject, Comment: "requirements unclear",
+	})
+	if err != nil {
+		t.Fatalf("a return by another actor must be stored: %v", err)
+	}
+	if resolved.Status != StatusResolved || resolved.ResolvedAction != "return_to_coder" ||
+		len(resolved.Decisions) != 1 || resolved.Decisions[0].ActorID != "reviewer-2" ||
+		resolved.Decisions[0].ActorRole != "reviewer" {
+		t.Fatalf("return decision = %+v", resolved)
+	}
+
+	// The gate-override right is a separate system right: its authority marker
+	// is still accepted and persisted for the audit trail.
+	check, err := store.Create(checkDecisionApproval())
+	if err != nil {
+		t.Fatal(err)
+	}
+	overridden, err := store.Decide(check.RunID, check.ID, Decision{
+		ActorID: "admin-1", ActorRole: "architect", Action: "override", Comment: "риск принят",
+		SubjectHash: check.SubjectHash, Authority: AuthoritySystemAdmin, ControllerAuthenticated: true,
+	})
+	if err != nil {
+		t.Fatalf("admin override must still work: %v", err)
+	}
+	if len(overridden.Decisions) != 1 || overridden.Decisions[0].Authority != AuthoritySystemAdmin ||
+		!overridden.Decisions[0].ControllerAuthenticated {
+		t.Fatalf("admin authority must be recorded for audit: %+v", overridden.Decisions)
+	}
+}
+
 func TestStoreSkippableHumanInputRequiresReason(t *testing.T) {
 	store, err := NewStore(t.TempDir())
 	if err != nil {

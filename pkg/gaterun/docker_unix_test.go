@@ -214,10 +214,16 @@ func TestDockerLauncherPassesExactlyTheDeclaredMountsAndEnv(t *testing.T) {
 			envs = append(envs, args[i+1])
 		}
 	}
+	// The launcher binds the resolved root, not the spelling the fixture used:
+	// on macOS a TempDir under /var resolves to /private/var.
+	realRepo, err := filepath.EvalSymlinks(f.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
 	wantMounts := []string{
-		"type=bind,source=" + f.repo + ",target=/gate/repo,readonly",
+		"type=bind,source=" + realRepo + ",target=/gate/repo,readonly",
 		"type=bind,source=",
-		"type=bind,source=" + filepath.Join(f.repo, "build") + ",target=/out",
+		"type=bind,source=" + filepath.Join(realRepo, "build") + ",target=/out",
 	}
 	if len(mounts) != 3 || mounts[0] != wantMounts[0] || !strings.HasPrefix(mounts[1], wantMounts[1]) || !strings.HasSuffix(mounts[1], ",target=/gate/evidence") ||
 		strings.Contains(mounts[1], "readonly") || mounts[2] != wantMounts[2] {

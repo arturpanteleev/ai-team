@@ -120,6 +120,8 @@ case "$AGENT" in
 
   coder)
     create_output "e2e_implementation.go" "package e2eimplementation\n\nconst Feature = \"$FEATURE\""
+    create_output "$ARTIFACT_ROOT/$FEATURE/coder.diff" "diff --git a/feature.txt b/feature.txt\n--- a/feature.txt\n+++ b/feature.txt\n@@ -1,1 +1,1 @@\n-old\n+$FEATURE"
+    create_output "$ARTIFACT_ROOT/$FEATURE/unit-test-report.md" "# Unit Test Report for $FEATURE\n\n## Coverage\n- unit-тесты реализованы и покрывают изменения\n\n**Result:** PASS"
     write_summary
     ;;
 

@@ -12,4 +12,10 @@ test_modify_policy: required
 inputs:
   design: '{feature}/design.md'
   tasks: '{feature}/tasks.md'
-outputs: {}
+# Явный контракт результата (COD-02): один только diff в workspace не считается
+# успехом — агент обязан произвести и атрибутировать оба артефакта. PR-ссылка
+# НЕ объявляется здесь: commit/push/PR выполняет только контроллер после
+# approval точного SHA-256 плана; ссылка проверяется на этапе implementation.
+outputs:
+  diff: '{feature}/coder.diff'
+  unit-test-report: '{feature}/unit-test-report.md'

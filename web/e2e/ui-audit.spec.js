@@ -685,3 +685,160 @@ test.describe('DES-05: volumetric cards and pastel bubbles', () => {
       .toBe('Открыть задачу: Работающая задача')
   })
 })
+
+// DES-06: three decorative holograms underline states that are already named in
+// text. The movement borrows the reference's materialization character, never its
+// pastel palette; S16 colours, focus order, actions and the 390px layout stay put.
+test.describe('DES-06: holographic state glyphs', () => {
+  async function emptyQueue(page, theme = 'light', width = 1440) {
+    await page.addInitScript((value) => { try { localStorage.setItem('ai-team:theme', value) } catch {} }, theme)
+    await page.setViewportSize({ width, height: 900 })
+    await page.route('**/api/**', async (route) => {
+      const { pathname } = new URL(route.request().url())
+      const json = (body, status = 200) => route.fulfill({ status, json: body })
+      if (pathname === '/api/session') return json({ csrf_token: 'x', principal: { actor_id: 'audit-user', roles: ['product_owner'] } })
+      if (pathname === '/api/auth/config') return json({ authentication_required: true, team_management_enabled: true })
+      if (pathname === '/api/version') return json({ version: 'audit' })
+      if (pathname === '/api/pipelines') return json([])
+      if (pathname === '/api/projects') return json({ projects: [] })
+      if (pathname === '/api/preflight') return json({ ready: true, checks: [] })
+      return json({ error: `audit fixture: ${pathname} is not stubbed` }, 404)
+    })
+    await page.goto(`${baseURL}/`)
+    await expect(page.getByText(/Задач пока нет\. Нажмите «Новая задача»/)).toBeVisible()
+  }
+
+  for (const theme of ['light', 'dark']) {
+    test(`${theme}: empty queue materializes a neutral reticle`, async ({ page }) => {
+      await emptyQueue(page, theme)
+      const glyph = page.locator('[data-holo="empty"]')
+      await expect(glyph).toBeVisible()
+      const shape = await glyph.evaluate((element) => ({
+        color: getComputedStyle(element).color,
+        arc: getComputedStyle(element.querySelector('path[class*="arc"]')).animationName,
+        scan: getComputedStyle(element.querySelector('line[class*="scan"]')).animationName,
+        dash: {
+          arc: getComputedStyle(element.querySelector('path[class*="arc"]')).strokeDasharray,
+          brackets: getComputedStyle(element.querySelector('path[class*="brackets"]')).strokeDasharray,
+          dots: getComputedStyle(element.querySelector('circle[class*="dots"]')).strokeDasharray,
+        },
+        focusable: element.querySelectorAll('button, a, [tabindex]').length,
+      }))
+      expect(shape.color).toBe(await tokenValue(page, 'color: var(--text-secondary)', 'color'))
+      expect(shape.arc).toContain('holo-draw')
+      expect(shape.scan).toContain('holo-sweep')
+      // A dash offset cannot draw anything without a dash pattern to shift.
+      for (const [part, pattern] of Object.entries(shape.dash)) {
+        expect(pattern, `${theme}: ${part} has no computed stroke-dasharray`).not.toBe('none')
+      }
+      expect(shape.focusable).toBe(0)
+      expect(await page.locator('[data-holo="complete"], [data-holo="decision"]').count()).toBe(0)
+    })
+
+    test(`${theme}: completion draws a green check, awaiting decision orbits teal brackets`, async ({ page }) => {
+      await open(page, 'passed', { theme })
+      const done = page.locator('[data-holo="complete"]')
+      await expect(done).toBeVisible()
+      const check = await done.evaluate((element) => ({
+        color: getComputedStyle(element).color,
+        animation: getComputedStyle(element.querySelector('path[class*="check"]')).animationName,
+        dash: {
+          ring: getComputedStyle(element.querySelector('circle[class*="ring"]')).strokeDasharray,
+          check: getComputedStyle(element.querySelector('path[class*="check"]')).strokeDasharray,
+        },
+        focusable: element.querySelectorAll('button, a, [tabindex]').length,
+      }))
+      expect(check.color).toBe(await tokenValue(page, 'color: var(--success-fg)', 'color'))
+      expect(check.animation).toContain('holo-draw')
+      for (const [part, pattern] of Object.entries(check.dash)) {
+        expect(pattern, `${theme}: ${part} has no computed stroke-dasharray`).not.toBe('none')
+      }
+      expect(check.focusable).toBe(0)
+      expect(await page.locator('[data-holo="decision"]').count()).toBe(0)
+      expect(await page.getByRole('complementary', { name: 'Действия' }).locator('button[class*="primary"]').count()).toBeLessThanOrEqual(1)
+
+      await page.unrouteAll({ behavior: 'ignoreErrors' })
+      await open(page, 'awaiting-human', { theme })
+      const waiting = page.locator('[data-holo="decision"]')
+      await expect(waiting).toBeVisible()
+      const orbit = await waiting.evaluate((element) => ({
+        color: getComputedStyle(element).color,
+        animation: getComputedStyle(element.querySelector('path[class*="orbit"]')).animationName,
+        bracketsDash: getComputedStyle(element.querySelector('path[class*="brackets"]')).strokeDasharray,
+        focusable: element.querySelectorAll('button, a, [tabindex]').length,
+      }))
+      expect(orbit.color).toBe(await tokenValue(page, 'color: var(--ink-teal)', 'color'))
+      expect(orbit.animation).toContain('holo-orbit')
+      expect(orbit.bracketsDash, `${theme}: decision brackets have no computed stroke-dasharray`).not.toBe('none')
+      expect(orbit.focusable).toBe(0)
+      expect(await page.locator('[data-holo="complete"]').count()).toBe(0)
+      await expect(page.getByRole('button', { name: 'Принять и перейти: Техническая реализация' })).toBeVisible()
+    })
+  }
+
+  test('reduced motion leaves all three glyphs static and fully drawn', async ({ page }) => {
+    await page.emulateMedia({ reducedMotion: 'reduce' })
+    await emptyQueue(page)
+    const stopped = await page.locator('[data-holo="empty"]').evaluate((element) => ({
+      parts: [...element.querySelectorAll('svg *')].map((child) => getComputedStyle(child).animationName),
+      filter: getComputedStyle(element.querySelector('svg')).filter,
+      glow: getComputedStyle(element, '::before').boxShadow,
+      dash: {
+        arc: getComputedStyle(element.querySelector('path[class*="arc"]')).strokeDasharray,
+        brackets: getComputedStyle(element.querySelector('path[class*="brackets"]')).strokeDasharray,
+      },
+      width: element.getBoundingClientRect().width,
+    }))
+    expect(stopped.parts.every((name) => name === 'none')).toBe(true)
+    expect(stopped.filter).toBe('none')
+    expect(stopped.glow).toBe('none')
+    for (const [part, pattern] of Object.entries(stopped.dash)) {
+      expect(pattern, `${part} lost its dash pattern without motion`).not.toBe('none')
+    }
+    expect(stopped.width).toBeGreaterThan(0)
+
+    await page.unrouteAll({ behavior: 'ignoreErrors' })
+    await open(page, 'passed', { theme: 'dark' })
+    const done = await page.locator('[data-holo="complete"] circle[class*="ring"]').evaluate((element) => ({
+      animation: getComputedStyle(element).animationName,
+      offset: getComputedStyle(element).strokeDashoffset,
+      dash: getComputedStyle(element).strokeDasharray,
+      glow: getComputedStyle(element.closest('[data-holo]'), '::before').boxShadow,
+    }))
+    expect(done.animation).toBe('none')
+    expect(done.offset).toBe('0px')
+    expect(done.dash).not.toBe('none')
+    expect(done.glow).toBe('none')
+
+    await page.unrouteAll({ behavior: 'ignoreErrors' })
+    await open(page, 'awaiting-human')
+    const orbits = await page.locator('[data-holo="decision"] path[class*="orbit"]').evaluateAll((elements) =>
+      elements.map((element) => getComputedStyle(element).animationName))
+    expect(orbits).toEqual(['none', 'none'])
+    const brackets = await page.locator('[data-holo="decision"] path[class*="brackets"]').evaluate((element) => ({
+      animation: getComputedStyle(element).animationName,
+      dash: getComputedStyle(element).strokeDasharray,
+      glow: getComputedStyle(element.closest('[data-holo]'), '::before').boxShadow,
+    }))
+    expect(brackets.animation).toBe('none')
+    expect(brackets.dash).not.toBe('none')
+    expect(brackets.glow).toBe('none')
+  })
+
+  test('390px keeps every glyph visible without horizontal scroll or a new tab stop', async ({ page }) => {
+    await emptyQueue(page, 'light', 390)
+    expect((await horizontalOverflow(page)).page).toBe(0)
+    const empty = page.locator('[data-holo="empty"]')
+    await expect(empty).toBeVisible()
+    expect(await empty.evaluate((element) => element.getBoundingClientRect().width)).toBeLessThanOrEqual(44)
+
+    await page.unrouteAll({ behavior: 'ignoreErrors' })
+    await open(page, 'awaiting-human', { width: 390, height: 844 })
+    expect((await horizontalOverflow(page)).page).toBe(0)
+    await expect(page.locator('[data-holo="decision"]')).toBeVisible()
+    // The glyph is aria-hidden and carries no tabindex: tabbing still starts at the link in the header.
+    await page.getByRole('link', { name: 'К действиям' }).focus()
+    await page.keyboard.press('Tab')
+    expect(await page.evaluate(() => document.activeElement?.hasAttribute('data-holo'))).toBe(false)
+  })
+})

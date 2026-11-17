@@ -6,6 +6,7 @@ import { mayPerform, permissionRoles } from '../permissions';
 import { getActivePrincipal } from '../api';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { PipelineCard } from '../components/PipelineCard';
+import { HoloGlyph } from '../components/HoloGlyph';
 import { Link } from '../router';
 import { statusLabels } from '../statusLabels';
 import { usePageTitle } from '../hooks/usePageTitle';
@@ -174,6 +175,7 @@ export function Dashboard() {
           <div className={styles.loading}>Загружаем задачи…</div>
         ) : filtered.length === 0 ? (
           <div className={styles.empty}>
+            <HoloGlyph state="empty" block />
             {runs.length === 0
               ? `Задач пока нет.${canStart ? ` Нажмите «${actionVerbs.newTask}» справа — это первый шаг.` : ''}`
               : 'Ничего не найдено по этим условиям.'}

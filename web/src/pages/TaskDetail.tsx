@@ -36,6 +36,7 @@ import { usePageTitle } from '../hooks/usePageTitle';
 import { CopyableHash } from '../components/CopyableHash';
 import { GateHistory, GatePanel, GateRetryActions } from '../components/GatePanel';
 import { Icon } from '../components/Icon';
+import { HoloGlyph, type HoloState } from '../components/HoloGlyph';
 import { TrackerActions, TrackerDetails, TrackerSummary } from '../components/TrackerPanel';
 import { useRunTracker } from '../trackerState';
 import { actionVerbs, allowedActionText } from '../actionLabels';
@@ -923,6 +924,10 @@ export function TaskDetail() {
   const exceptionsVisible = Boolean(currentStage) && (allowed.has('skip') || (allowed.has('override') && canOverride)
     || (allowed.has('return') && returnOptions.length > 0));
   const needActor = !principal && (questionDecisions.length > 0 || otherDecisions.length > 0);
+  // DES-06: декоративная голограмма подчёркивает уже показанное состояние.
+  // Не добавляет кнопок, текста и элементов фокуса — порядок DOM не меняется.
+  const holoState: HoloState | null = finished ? 'complete'
+    : currentDecision || questionDecisions.length > 0 || otherDecisions.length > 0 ? 'decision' : null;
   // Actions the task offers but this viewer may not perform: no button, a hint naming the role instead.
   const roleForAction = (action: string): string[] => {
     const stage = template?.stages.find((item) => item.id === actionStageID);
@@ -1006,6 +1011,7 @@ export function TaskDetail() {
               ? serverCurrent.visit_count > 1 && <p className={styles.stageState} data-quiet="true">
                 Посещение {serverCurrent.active_visit} из {serverCurrent.visit_count}{serverCurrentReturned ? ' (возврат)' : ''}</p>
               : <p className={styles.stageState} data-state={stageState}>{stageState}</p>}
+            {holoState && <HoloGlyph state={holoState} />}
             <dl className={styles.facts}>
               <div><dt>Кто действует</dt><dd>
                 <Icon name={serverCurrent?.executor.kind === 'external_agent' ? 'external'

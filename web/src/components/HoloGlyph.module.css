@@ -1,0 +1,155 @@
+/* DES-06: голографическая материализация — линии «собираются», вокруг них
+   пробегает луч. Ни одного собственного цвета: оттенок states задан токенами
+   S16, свечение и длительности — токенами DES-02. */
+.glyph {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
+  vertical-align: middle;
+  pointer-events: none;
+  color: var(--text-secondary);
+}
+
+.md {
+  width: 44px;
+  height: 44px;
+}
+
+/* В пустом состоянии глиф стоит над подписью и не мешает переносу текста на 390 px. */
+.block {
+  display: flex;
+  margin: 0 auto 12px;
+}
+
+.glyph svg {
+  position: relative;
+  z-index: 1;
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  filter: drop-shadow(0 0 4px currentColor);
+}
+
+/* Свечение токеном DES-02 под контуром, а не поверх текста. */
+.glyph::before {
+  content: '';
+  position: absolute;
+  inset: 22%;
+  border-radius: 50%;
+  box-shadow: var(--holo-glow, var(--glow-accent));
+  opacity: 0.8;
+}
+
+/* Пустота нейтральна (не ошибка): S16-цветовую семантику не трогаем. */
+.empty {
+  --holo-glow: var(--glow-accent);
+  color: var(--text-secondary);
+}
+
+/* Завершение — тот же зелёный, что и чип «Пройден». */
+.complete {
+  --holo-glow: var(--glow-teal);
+  color: var(--success-fg);
+}
+
+/* Ожидание решения — тот же тёмно-бирюзовый, что и статус «Ждёт человека». */
+.decision {
+  --holo-glow: var(--glow-teal);
+  color: var(--ink-teal);
+}
+
+.glyph :is(.ring, .arc, .scan, .core, .check, .spark, .orbit, .orbitAlt, .brackets) {
+  transform-box: view-box;
+  transform-origin: 50% 50%;
+}
+
+/* Базовое состояние — итоговое, видимое: при reduced-motion анимаций просто нет. */
+.arc,
+.brackets,
+.ring,
+.check {
+  stroke-dashoffset: 0;
+}
+
+.arc,
+.brackets,
+.check,
+.ring {
+  animation: holo-draw var(--duration-slow) var(--ease-out) both;
+}
+
+.brackets,
+.arc {
+  --dash: 64;
+}
+
+.check {
+  animation-delay: var(--duration-fast);
+}
+
+.scan {
+  opacity: 0.4;
+  animation: holo-sweep calc(var(--duration-slow) * 4) var(--ease-standard) infinite;
+}
+
+.core {
+  animation: holo-pulse var(--duration-slow) var(--ease-standard) infinite alternate;
+}
+
+.spark {
+  opacity: 0;
+  animation: holo-bloom var(--duration-slow) var(--ease-out) var(--duration-fast) both;
+}
+
+.orbit,
+.orbitAlt {
+  animation: holo-orbit calc(var(--duration-slow) * 2) var(--ease-standard) infinite alternate;
+}
+
+.orbitAlt {
+  animation-direction: alternate-reverse;
+}
+
+@keyframes holo-draw {
+  from { stroke-dashoffset: var(--dash, 120); }
+  to { stroke-dashoffset: 0; }
+}
+
+@keyframes holo-sweep {
+  from { transform: rotate(0deg); opacity: 0; }
+  50% { opacity: 0.5; }
+  to { transform: rotate(360deg); opacity: 0; }
+}
+
+@keyframes holo-pulse {
+  from { opacity: 0.35; transform: scale(0.85); }
+  to { opacity: 1; transform: scale(1.15); }
+}
+
+@keyframes holo-bloom {
+  from { opacity: 0.8; transform: scale(0.7); }
+  to { opacity: 0; transform: scale(1.15); }
+}
+
+@keyframes holo-orbit {
+  from { transform: rotate(-12deg); }
+  to { transform: rotate(12deg); }
+}
+
+/* Движение выключено полностью: остаётся статичная читаемая разметка. */
+@media (prefers-reduced-motion: reduce) {
+  .glyph,
+  .glyph svg,
+  .glyph::before,
+  .glyph :is(.ring, .arc, .scan, .core, .check, .spark, .orbit, .orbitAlt, .brackets) {
+    animation: none;
+  }
+
+  .glyph svg {
+    filter: none;
+  }
+}

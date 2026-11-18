@@ -795,7 +795,7 @@ Releases произошла позже (в конце августа 2026 г.), 
 - CLI: `ai-team version`, exit-коды run (OK/FAILED/BLOCKED/USER_STOPPED),
   E2E-тесты на mock-opencode.
 
-[Unreleased]: https://github.com/arturpanteleev/ai-team/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/arturpanteleev/ai-team/compare/v0.2.44...HEAD
 [0.2.44]: https://github.com/arturpanteleev/ai-team/compare/v0.2.43...v0.2.44
 [0.2.43]: https://github.com/arturpanteleev/ai-team/compare/v0.2.42...v0.2.43
 [0.2.42]: https://github.com/arturpanteleev/ai-team/compare/v0.2.41...v0.2.42

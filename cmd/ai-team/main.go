@@ -117,6 +117,8 @@ func main() {
 		cmdGC()
 	case "db":
 		cmdDB()
+	case "template":
+		cmdTemplate()
 	case "version":
 		fmt.Println(version)
 	case "help", "--help", "-h":
@@ -173,6 +175,10 @@ func printUsage() {
                                    Снимок SQLite controller database
   ai-team db restore --from <snapshot> --out <new-path>
                                    Восстановить SQLite snapshot в новый путь
+  ai-team template audit [--target <path>] [--rewrite [<version>...]]
+                                   Разовый аудит сохранённых версий шаблона без якоря
+                                   доверия (dry-run); --rewrite пересохраняет проверенные
+                                   версии через доверенный файловый якорь
   ai-team version                  Версия
   ai-team help                     Эта справка
 

@@ -3,10 +3,52 @@
 # добавлены только гейты каждого вида, внешний исполнитель этапа code_review и
 # фейковый трекер. Скрипт scripts/demo/run-demo.sh копирует файл в
 # .ai-team/config.yaml временного демо-репозитория.
-schema_version: 6
+schema_version: 7
 template: idea-to-prod
 title: От идеи до продакшена (демо S17)
+workflow: idea-to-prod
 stall_after: 24h
+
+# Два workflow в каталоге: исходный SDLC и короткий bugfix на базе fast.
+# У bugfix свои два графа (триаж → исправление), входной гейт маркера вердикта
+# и выходной гейт решения человека; поля model в workflow нет — модель живёт
+# на агентах и executor_adapters. Старые задачи закреплены на своей версии
+# шаблона и продолжают идти по записанному в ней workflow.
+workflows:
+  - id: idea-to-prod
+    title: От идеи до продакшена
+    description: "Стандартный SDLC-Workflow: от идеи до продакшена."
+    version: 1
+    graphs:
+      - id: sdlc
+        title: SDLC
+        template: idea-to-prod
+
+  - id: bugfix
+    title: Исправление дефекта
+    description: "Короткий workflow: триаж дефекта, исправление и проверка — без продуктовой спецификации и архитектуры."
+    version: 1
+    extends: idea-to-prod
+    graphs:
+      - id: bug-fix
+        title: Исправление
+        template: idea-to-prod
+        entry: implementation
+      - id: bug-triage
+        title: Триаж дефекта
+        template: idea-to-prod
+        entry: code_review
+        transitions:
+          - {from: bug-triage, to: bug-fix, on: passed}
+    entry_gate_groups:
+      - - gate: verdict_marker
+          version: 1
+          name: bug_report_verdict
+    exit_gate_groups:
+      - - gate: human_approval
+          version: 2
+          name: hotfix_approval
+          params: {on_reject: stay}
 
 stages:
   - id: intent

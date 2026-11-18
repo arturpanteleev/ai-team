@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/arturpanteleev/ai-team/pkg/gatelib"
 	"github.com/arturpanteleev/ai-team/pkg/safeio"
+	"github.com/arturpanteleev/ai-team/pkg/workflow"
 	"gopkg.in/yaml.v3"
 )
 
@@ -61,6 +63,87 @@ const (
 	ProfileFast      = "fast"
 	ProfileRegulated = "regulated"
 )
+
+// Built-in workflow catalog. A workflow is a named set of graphs a task travels
+// through; it owns no LLM model (model/effort/cli stay on agents and adapters).
+// `idea-to-prod` is the original SDLC workflow synthesized for old v5/v6
+// configs, `bugfix` is the short second scenario built from the fast profile.
+const (
+	BugfixWorkflowID    = "bugfix"
+	BugfixTriageGraphID = "bug-triage"
+	BugfixFixGraphID    = "bug-fix"
+)
+
+// builtinSDLCWorkflow is the in-memory counterpart of the workflow synthesized
+// by Config.defaultWorkflowMeta for file configs without a `workflows` block.
+func builtinSDLCWorkflow(template string) WorkflowMeta {
+	if template == "" {
+		template = DefaultWorkflowID
+	}
+	return WorkflowMeta{
+		ID:          DefaultWorkflowID,
+		Title:       "От идеи до продакшена",
+		Description: "Стандартный SDLC-Workflow: от идеи до продакшена.",
+		Version:     1,
+		Graphs: []WorkflowGraph{{
+			ID:       DefaultGraphID,
+			Title:    "SDLC",
+			Template: template,
+		}},
+	}
+}
+
+// builtinBugfixWorkflow is the second built-in scenario. It is deliberately
+// not a copy of idea-to-prod: the task starts at review/fix instead of product
+// discovery, declares two connected graphs instead of one, and uses its own
+// entry/exit gate chains instead of inheriting the SDLC gates. The short path
+// follows the fast profile (no manual confirmations on the stage itself).
+func builtinBugfixWorkflow(template string) WorkflowMeta {
+	if template == "" {
+		template = DefaultWorkflowID
+	}
+	return WorkflowMeta{
+		ID:          BugfixWorkflowID,
+		Title:       "Исправление дефекта",
+		Description: "Короткий workflow: триаж дефекта, исправление и проверка — без продуктовой спецификации и архитектуры.",
+		Version:     1,
+		Extends:     DefaultWorkflowID,
+		Graphs: []WorkflowGraph{
+			// The target graph is declared first: transitions may only point at
+			// graphs that are already declared (see validateWorkflows).
+			{ID: BugfixFixGraphID, Title: "Исправление", Template: template, Entry: "coder"},
+			{ID: BugfixTriageGraphID, Title: "Триаж дефекта", Template: template, Entry: "reviewer",
+				Transitions: []WorkflowGraphTransition{{From: BugfixTriageGraphID, To: BugfixFixGraphID, On: "passed"}}},
+		},
+		EntryGateGroups: workflow.GateGroups{{workflow.GateRef{
+			Gate: gatelib.GateVerdictMarker, Version: 1, Name: "bug_report_verdict",
+		}}},
+		ExitGateGroups: workflow.GateGroups{{workflow.GateRef{
+			Gate: gatelib.GateHumanApproval, Version: 2, Name: "hotfix_approval",
+			Params: map[string]any{"on_reject": gatelib.OnRejectStay},
+		}}},
+	}
+}
+
+// BuiltinWorkflows returns the default catalog of a config: the SDLC workflow
+// plus the short bugfix workflow. init keeps writing v6 files (old readers and
+// pinned v6 tasks are untouched); the in-memory default config and the demo
+// template carry both workflows so the catalog and task creation can pick one.
+func BuiltinWorkflows(template string) []WorkflowMeta {
+	return []WorkflowMeta{builtinSDLCWorkflow(template), builtinBugfixWorkflow(template)}
+}
+
+// WithActiveWorkflow returns a copy of the config pinned to the selected
+// workflow. A task created from the returned config keeps that workflow (and
+// its gate chains) in its immutable template pin.
+func (c *Config) WithActiveWorkflow(id string) (*Config, error) {
+	if c.workflowByID(id) == nil {
+		return nil, fmt.Errorf("workflow %q не найден в каталоге", id)
+	}
+	out := *c
+	out.ActiveWorkflow = id
+	return &out, nil
+}
 
 type stageSpec struct {
 	name              string
@@ -153,6 +236,10 @@ func DefaultProfile(profile string) (*Config, error) {
 	for _, stage := range stages {
 		cfg.PipelineAgents = append(cfg.PipelineAgents, AgentConfig{Name: stage.ID})
 	}
+	// The catalog is available in memory for task creation; the v6 file init
+	// writes stays workflow-free (see MarshalYAML), so every old reader and
+	// already pinned v6 task keeps its single synthesized idea-to-prod graph.
+	cfg.Workflows = BuiltinWorkflows(templateName)
 	return cfg, nil
 }
 
@@ -303,7 +390,13 @@ func Default() *Config {
 		{name: "verifier", roles: []string{"qa"}, maxVisits: 3},
 		{name: "deployer"},
 	}
-	return buildConfig(ProfileStandard, stages, QuorumAny(), QuorumAny(), 3)
+	cfg := buildConfig(ProfileStandard, stages, QuorumAny(), QuorumAny(), 3)
+	// The default in-memory config serves both the CLI fallback and the run
+	// engine when no project config is present. It carries the whole catalog so
+	// a second workflow can be selected; the legacy `workflow` graph projection
+	// stays the idea-to-prod path, so old runs are unchanged.
+	cfg.Workflows = BuiltinWorkflows(cfg.Template)
+	return cfg
 }
 
 // Marshal serializes the project template and supported configuration fields.
@@ -321,6 +414,13 @@ func (c *Config) Marshal() ([]byte, error) {
 func (c *Config) MarshalYAML() (any, error) {
 	type plain Config
 	out := plain(*c)
+	// A v5/v6 file has no workflow block: never write one into it. The catalog
+	// is synthesized on load, so old configs and pinned tasks keep their single
+	// idea-to-prod workflow until the template is explicitly migrated to v7.
+	if c.SchemaVersion < WorkflowSchemaVersion {
+		out.Workflows = nil
+		out.ActiveWorkflow = ""
+	}
 	out.Stages = make([]TemplateStage, len(c.Stages))
 	for i, stage := range c.Stages {
 		if c.SchemaVersion == CurrentSchemaVersion {

@@ -93,11 +93,13 @@ describe('Workflow catalogue', () => {
   it('сохраняет процессные поля и обновляет карточку', async () => {
     renderAt('/workflows/idea-to-prod', [{ path: '/workflows/:workflowID', element: <WorkflowDetailPage /> }]);
 
-    const titleInput = await screen.findByLabelText('Название');
-    const descriptionInput = screen.getByLabelText('Описание');
+    const editorRegion = await screen.findByRole('region', { name: 'Настройки workflow' });
+    const titleInput = within(editorRegion).getByLabelText('Название');
+    const descriptionInput = within(editorRegion).getByLabelText('Описание');
     fireEvent.change(titleInput, { target: { value: 'SDLC v2' } });
     fireEvent.change(descriptionInput, { target: { value: 'Новое описание' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Сохранить' }));
+    await waitFor(() => expect(titleInput).toHaveValue('SDLC v2'));
+    fireEvent.click(within(editorRegion).getByRole('button', { name: 'Сохранить' }));
 
     await waitFor(() => expect(updateWorkflowProcess).toHaveBeenCalledWith('idea-to-prod', {
       title: 'SDLC v2', description: 'Новое описание',

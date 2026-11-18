@@ -84,6 +84,14 @@ func (s *TemplateStore) Publish(data []byte, expectedVersion string) (string, er
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Serialize the whole read-modify-write cycle with other processes too.
+	// The in-process mutex above only covers this store instance; the web and a
+	// CLI/worker each hold their own instance against the same project.
+	unlock, err := s.lockPublish()
+	if err != nil {
+		return "", err
+	}
+	defer unlock()
 	current, currentVersion, err := s.ReadCurrent()
 	if err != nil {
 		return "", err

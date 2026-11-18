@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -51,6 +52,17 @@ func (s *TemplateStore) AuditVersions() ([]TemplateVersionAudit, error) {
 	audited := map[string]bool{}
 	audit := func(id string, data []byte) {
 		audited[id] = true
+		// An explicit re-save is the trusted file anchor for these exact bytes;
+		// it is no longer a finding. An unreadable anchor is a finding, not a
+		// silent pass, so a broken registry cannot hide an unreviewed version.
+		anchored, anchorErr := s.isTrustedVersion(data)
+		if anchorErr != nil {
+			findings = append(findings, TemplateVersionAudit{Version: id, Problems: []string{fmt.Sprintf("якорь доверия не прочитан: %v", anchorErr)}})
+			return
+		}
+		if anchored {
+			return
+		}
 		parsed, parseErr := ParseYAML(data)
 		if parseErr != nil {
 			findings = append(findings, TemplateVersionAudit{Version: id, Problems: []string{fmt.Sprintf("версия не разбирается: %v", parseErr)}})
@@ -78,6 +90,71 @@ func (s *TemplateStore) AuditVersions() ([]TemplateVersionAudit, error) {
 	if anchor.webWritten && !audited[activeVersion] {
 		audit(activeVersion, anchor.active)
 	}
+	// A publication made before the web-written registry existed left neither a
+	// registry record nor a baseline, so the active file trusts itself. It is
+	// still a stored immutable version: when its bytes were published (they are
+	// in versions/) and it carries commands, list it as a candidate for review.
+	// A hand-edited file is not in versions/ and stays out of the audit.
+	if !anchor.webWritten && !audited[activeVersion] && len(anchor.baseline.UntrustedCommandProblems(nil)) > 0 {
+		published := false
+		for _, version := range versions {
+			if version.ID == activeVersion {
+				published = true
+				break
+			}
+		}
+		anchored, anchorErr := s.isTrustedVersion(anchor.active)
+		if anchorErr == nil && published && !anchored {
+			problems := []string{"активный config.yaml содержит команды или инфраструктуру, но не имеет якоря доверия (возможно, веб-запись до появления реестра)"}
+			problems = append(problems, anchor.baseline.UntrustedCommandProblems(nil)...)
+			findings = append(findings, TemplateVersionAudit{Version: activeVersion, Problems: problems})
+		}
+	}
 	sort.Slice(findings, func(i, j int) bool { return findings[i].Version < findings[j].Version })
 	return findings, nil
+}
+
+// versionData resolves a version by its content id. Stored published versions
+// live under versions/; an active configuration that predates the store (or a
+// pre-registry web write) may only exist as .ai-team/config.yaml.
+func (s *TemplateStore) versionData(id string) ([]byte, error) {
+	data, err := s.readVersion(id)
+	if err == nil {
+		return data, nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	active, _, readErr := s.ReadCurrent()
+	if readErr != nil || TemplateVersionID(active) != id {
+		return nil, err
+	}
+	return active, nil
+}
+
+// RewriteVersion is the explicit re-save of one reviewed template version. It
+// re-writes the exact, digest-verified bytes through the trusted local file
+// path and records the trusted file anchor that lets this one version run.
+//
+// It deliberately does not publish, does not mark the bytes web-written, does
+// not save a baseline and does not touch .ai-team/config.yaml. Only the named
+// version gains trust; every other version stays subject to RequireTrusted.
+func (s *TemplateStore) RewriteVersion(id string) error {
+	if !templateVersionPattern.MatchString(id) {
+		return fmt.Errorf("недопустимый идентификатор версии шаблона %q", id)
+	}
+	data, err := s.versionData(id)
+	if err != nil {
+		return fmt.Errorf("версия %s: %w", id, err)
+	}
+	if TemplateVersionID(data) != id {
+		return fmt.Errorf("версия %s повреждена", id)
+	}
+	if err := s.writeImmutableVersion(id, data); err != nil {
+		return fmt.Errorf("пересохранить версию %s: %w", id, err)
+	}
+	if err := s.markTrustedVersion(data); err != nil {
+		return fmt.Errorf("якорь доверия версии %s: %w", id, err)
+	}
+	return nil
 }

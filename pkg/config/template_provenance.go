@@ -34,9 +34,17 @@ import (
 // and is treated as a file configuration. Review it with `ai-team template
 // audit`.
 
+// The re-save anchor (trusted-versions) is the counterpart for stored versions.
+// `ai-team template audit --rewrite` writes a marker under trusted-versions for
+// the exact bytes an operator reviewed; that marker is the trusted file anchor
+// for that version, the same decision as a person editing config.yaml but
+// scoped to those bytes. It never changes the active file configuration and
+// never grants trust to any other version.
+
 const (
-	webWrittenDirName = "web-written"
-	baselineFileName  = "trusted-baseline.yaml"
+	webWrittenDirName      = "web-written"
+	baselineFileName       = "trusted-baseline.yaml"
+	trustedVersionsDirName = "trusted-versions"
 )
 
 func (s *TemplateStore) webWrittenPath(data []byte) string {
@@ -70,6 +78,42 @@ func (s *TemplateStore) isWebWritten(data []byte) (bool, error) {
 		return false, nil
 	} else if err != nil {
 		return false, fmt.Errorf("реестр web-written: %w", err)
+	}
+	return true, nil
+}
+
+// trustedVersionPath is the trusted file anchor of one reviewed byte sequence.
+func (s *TemplateStore) trustedVersionPath(data []byte) string {
+	return filepath.Join(s.target, ".ai-team", "templates", trustedVersionsDirName, TemplateVersionID(data))
+}
+
+// markTrustedVersion records that an operator reviewed these exact template
+// bytes and declared them trusted code. Only `template audit --rewrite` calls
+// it; it is written with the no-follow immutable primitive, so neither a
+// symlink nor a concurrent replacement can turn it into a different decision.
+func (s *TemplateStore) markTrustedVersion(data []byte) error {
+	path := s.trustedVersionPath(data)
+	if err := safeio.WriteRegularFileNoFollow(path, []byte(TemplateVersionID(data)+"\n"), 0444); err != nil {
+		if _, readErr := safeio.ReadRegularFile(path, 128); readErr == nil {
+			return nil
+		}
+		return fmt.Errorf("записать trusted-versions: %w", err)
+	}
+	return nil
+}
+
+// isTrustedVersion reports whether the exact bytes have an explicit review
+// anchor. A missing registry is normal and means no version was re-saved.
+func (s *TemplateStore) isTrustedVersion(data []byte) (bool, error) {
+	if _, err := safeio.ExistingDir(s.target, ".ai-team", "templates", trustedVersionsDirName); errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	} else if err != nil {
+		return false, fmt.Errorf("реестр trusted-versions: %w", err)
+	}
+	if _, err := safeio.ReadRegularFile(s.trustedVersionPath(data), 128); errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	} else if err != nil {
+		return false, fmt.Errorf("якорь доверия версии: %w", err)
 	}
 	return true, nil
 }

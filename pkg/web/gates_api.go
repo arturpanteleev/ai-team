@@ -56,7 +56,10 @@ func (s *Server) handleTaskStageGateRetry(w http.ResponseWriter, r *http.Request
 		writeJSONAPIError(w, http.StatusBadRequest, err.Error(), "bad_request")
 		return
 	}
-	s.retryStageGates(w, r, runID, stageID, state, stage, append([]string{gate}, command.Gates...), command.Reason)
+	// The named-gate route addresses the exit chain: a check decision is raised
+	// after the stage result, and the (workflow-level) exit gates are the ones
+	// that can be retried on that version.
+	s.retryStageGates(w, r, runID, stageID, state, stage, append([]string{gate}, command.Gates...), command.Reason, workflow.GatePhaseExit)
 }
 
 // handleTaskGateAttemptRetry is the same retry addressed by the ID of the
@@ -74,10 +77,19 @@ func (s *Server) handleTaskGateAttemptRetry(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	var stageID, gate string
+	var phase workflow.GatePhase
 	for _, wave := range waves {
 		for _, attempt := range wave.Attempts {
 			if attempt.AttemptID == attemptID {
 				stageID, gate = wave.Key.Stage, attempt.GateName
+				// The phase belongs to the wave (and to the attempt): an entry
+				// attempt must be checked against the entry chain, never treated
+				// as a retry of a same-named exit gate.
+				phase = wave.Phase
+				if phase == "" {
+					phase = attempt.Phase
+				}
+				phase = phase.Effective()
 			}
 		}
 	}
@@ -94,21 +106,43 @@ func (s *Server) handleTaskGateAttemptRetry(w http.ResponseWriter, r *http.Reque
 		writeJSONAPIError(w, http.StatusBadRequest, err.Error(), "bad_request")
 		return
 	}
-	s.retryStageGates(w, r, runID, stageID, state, stage, []string{gate}, command.Reason)
+	s.retryStageGates(w, r, runID, stageID, state, stage, []string{gate}, command.Reason, phase)
 }
 
-func (s *Server) retryStageGates(w http.ResponseWriter, r *http.Request, runID, stageID string, state lifecycle.State, stage config.TemplateStage, gates []string, reason string) {
+func (s *Server) retryStageGates(w http.ResponseWriter, r *http.Request, runID, stageID string, state lifecycle.State, stage config.TemplateStage, gates []string, reason string, phase workflow.GatePhase) {
 	if state.Phase != lifecycle.PhaseWaiting || state.PendingApprovalID == "" {
 		s.taskConflict(w, runID, stageID, "gate retry requires a failed check awaiting a decision")
 		return
 	}
+	cfg, found, err := s.pinnedTaskConfig(runID)
+	if err != nil || !found || cfg == nil {
+		writeJSONAPIError(w, http.StatusConflict, "run has no valid pinned template", "template_pin_unavailable")
+		return
+	}
+	exitGroups, err := cfg.ExitGateGroupsFor(stage)
+	if err != nil {
+		writeJSONAPIError(w, http.StatusInternalServerError, "gate chain unavailable", "gates_unavailable")
+		return
+	}
+	// The retry list is the effective chain of the pinned config, not just the
+	// stage's own groups: workflow-level exit gates are real gates too. An
+	// attempt of the entry chain is validated against the entry chain only, so
+	// a same-named exit gate cannot stand in for it.
+	chain := exitGroups
+	if phase.Effective() == workflow.GatePhaseEntry {
+		chain, err = cfg.EntryGateGroupsFor(stage)
+		if err != nil {
+			writeJSONAPIError(w, http.StatusInternalServerError, "gate chain unavailable", "gates_unavailable")
+			return
+		}
+	}
 	known := map[string]bool{}
-	for _, ref := range stage.EffectiveGateGroups().Refs() {
+	for _, ref := range chain.Refs() {
 		known[ref.InstanceName()] = true
 	}
 	for _, gate := range gates {
 		if !known[strings.TrimSpace(gate)] {
-			writeJSONAPIError(w, http.StatusNotFound, "stage "+stageID+" has no gate "+gate, "gate_not_found")
+			writeJSONAPIError(w, http.StatusNotFound, "stage "+stageID+" has no "+string(phase.Effective())+" gate "+gate, "gate_not_found")
 			return
 		}
 	}
@@ -128,6 +162,30 @@ func (s *Server) retryStageGates(w http.ResponseWriter, r *http.Request, runID, 
 	writeJSONResponse(w, http.StatusAccepted, map[string]any{"run_id": runID, "stage_id": stageID, "gates": gates, "actor_id": actorID})
 }
 
+// gateChainView is one effective chain of a stage — entry or exit — as the API
+// resolves it: the groups the UI renders, the flat refs for Resolve and the
+// instance-name to group index map.
+type gateChainView struct {
+	Groups  [][]string
+	Refs    []workflow.GateRef
+	GroupOf map[string]int
+}
+
+func newGateChainView(groups workflow.GateGroups) gateChainView {
+	chain := gateChainView{
+		Groups:  make([][]string, len(groups)),
+		Refs:    groups.Refs(),
+		GroupOf: map[string]int{},
+	}
+	for index, group := range groups {
+		for _, ref := range group {
+			chain.Groups[index] = append(chain.Groups[index], ref.InstanceName())
+			chain.GroupOf[ref.InstanceName()] = index
+		}
+	}
+	return chain
+}
+
 // gateWaveView is one result version of one stage visit with its gates, the
 // transition decision and the override recorded for exactly this version.
 type gateWaveView struct {
@@ -135,6 +193,9 @@ type gateWaveView struct {
 	Visit          int    `json:"visit"`
 	StageAttemptID string `json:"stage_attempt_id"`
 	ArtifactSHA256 string `json:"artifact_sha256"`
+	// Phase is the gate chain of the wave: entry (before the executor) or exit
+	// (after it). Old records with no phase are the exit chain.
+	Phase workflow.GatePhase `json:"phase"`
 	// Current is true for the latest wave of the stage: the one the
 	// transition is decided on.
 	Current    bool                   `json:"current"`
@@ -156,11 +217,16 @@ type gateWarningView struct {
 }
 
 type gateStageView struct {
-	StageID string         `json:"stage_id"`
-	Title   string         `json:"title,omitempty"`
-	Groups  [][]string     `json:"groups"`
-	Current *gateWaveView  `json:"current,omitempty"`
-	Waves   []gateWaveView `json:"waves"`
+	StageID string `json:"stage_id"`
+	Title   string `json:"title,omitempty"`
+	// Groups is the effective exit chain: the stage's own gates plus the
+	// workflow-level exit gates of the pinned config.
+	Groups [][]string `json:"groups"`
+	// EntryGroups is the effective entry chain, when the stage has one. The
+	// phase on each wave says which chain its gates were resolved against.
+	EntryGroups [][]string     `json:"entry_groups,omitempty"`
+	Current     *gateWaveView  `json:"current,omitempty"`
+	Waves       []gateWaveView `json:"waves"`
 }
 
 type taskGatesResponse struct {
@@ -262,30 +328,56 @@ func (s *Server) buildTaskGates(r *http.Request, runID string) (taskGatesRespons
 		response.Overrides = overrides
 	}
 	for _, stage := range cfg.Stages {
-		groups := stage.EffectiveGateGroups()
-		if len(groups) == 0 {
+		// The effective chains of the pinned config, not just the stage's own
+		// groups: workflow-level entry/exit gates are part of both views.
+		exitGroups, err := cfg.ExitGateGroupsFor(stage)
+		if err != nil {
+			return response, err
+		}
+		entryGroups, err := cfg.EntryGateGroupsFor(stage)
+		if err != nil {
+			return response, err
+		}
+		if len(exitGroups) == 0 && len(entryGroups) == 0 {
 			continue
 		}
-		view := gateStageView{StageID: stage.ID, Title: stage.Title, Groups: make([][]string, len(groups)), Waves: []gateWaveView{}}
-		groupOf := map[string]int{}
-		for index, group := range groups {
-			for _, ref := range group {
-				view.Groups[index] = append(view.Groups[index], ref.InstanceName())
-				groupOf[ref.InstanceName()] = index
-			}
+		chains := map[workflow.GatePhase]gateChainView{
+			workflow.GatePhaseExit: newGateChainView(exitGroups),
 		}
-		refs := groups.Refs()
+		if len(entryGroups) > 0 {
+			chains[workflow.GatePhaseEntry] = newGateChainView(entryGroups)
+		}
+		view := gateStageView{
+			StageID: stage.ID, Title: stage.Title,
+			Groups: chains[workflow.GatePhaseExit].Groups,
+			Waves:  []gateWaveView{},
+		}
+		if entry, ok := chains[workflow.GatePhaseEntry]; ok {
+			view.EntryGroups = entry.Groups
+		}
 		var stageWaves []gatesched.RecordedWave
 		for _, wave := range waves {
 			if wave.Key.Stage == stage.ID {
 				stageWaves = append(stageWaves, wave)
 			}
 		}
-		lastOfScope := map[string]int{}
+		type scopePhase struct {
+			scope string
+			phase workflow.GatePhase
+		}
+		lastOfScope := map[scopePhase]int{}
 		for index, wave := range stageWaves {
-			lastOfScope[wave.Key.Scope] = index
+			lastOfScope[scopePhase{wave.Key.Scope, wave.Phase.Effective()}] = index
 		}
 		for waveIndex, wave := range stageWaves {
+			phase := wave.Phase.Effective()
+			chain, ok := chains[phase]
+			if !ok {
+				// A chain may be gone from the pinned config while its attempts
+				// stay in history: keep the wave visible, with no configured
+				// statuses to resolve.
+				chain = gateChainView{GroupOf: map[string]int{}}
+			}
 			var override *gatesched.Override
 			for index := range overrides {
 				candidate := overrides[index]
@@ -294,30 +386,31 @@ func (s *Server) buildTaskGates(r *http.Request, runID string) (taskGatesRespons
 				}
 				if candidate.ArtifactSHA256 == wave.Key.ArtifactSHA256 && !candidate.IsLegacy() {
 					override = &candidate
-				} else if candidate.IsLegacy() && lastOfScope[wave.Key.Scope] == waveIndex && override == nil {
+				} else if candidate.IsLegacy() && lastOfScope[scopePhase{wave.Key.Scope, phase}] == waveIndex && override == nil {
 					// A pre-S06 override has no version: it is attached to the
 					// last version of its stage attempt, as history only.
 					override = &candidate
 				}
 			}
-			statuses, resolution := gatesched.Resolve(refs, func(ref workflow.GateRef) int { return groupOf[ref.InstanceName()] },
+			statuses, resolution := gatesched.Resolve(chain.Refs, func(ref workflow.GateRef) int { return chain.GroupOf[ref.InstanceName()] },
 				wave.Key.ArtifactSHA256, wave.Attempts, override)
 			view.Waves = append(view.Waves, gateWaveView{
 				StageID: stage.ID, Visit: wave.Key.Visit, StageAttemptID: wave.Key.Scope, ArtifactSHA256: wave.Key.ArtifactSHA256,
-				Gates: statuses, Resolution: resolution, Override: override, Attempts: wave.Attempts,
+				Phase: phase, Gates: statuses, Resolution: resolution, Override: override, Attempts: wave.Attempts,
 			})
 		}
 		if count := len(view.Waves); count > 0 {
-			view.Waves[count-1].Current = true
-			offered := offeredGateRetries(pending, stage.ID, view.Waves[count-1].ArtifactSHA256)
+			current := &view.Waves[count-1]
+			current.Current = true
+			offered := offeredGateRetries(pending, stage.ID, current.ArtifactSHA256, current.Phase)
 			for index := range view.Waves {
 				for position := range view.Waves[index].Gates {
 					status := &view.Waves[index].Gates[position]
-					status.Retryable = status.Retryable && index == count-1 && offered[status.GateName]
+					status.Retryable = status.Retryable && index == count-1 &&
+						offered[gateRetryKey{Phase: view.Waves[index].Phase, Gate: status.GateName}]
 				}
 			}
-			current := view.Waves[count-1]
-			view.Current = &current
+			view.Current = current
 			for _, status := range current.Gates {
 				if status.Warning && status.Attempt != nil {
 					response.Warnings = append(response.Warnings, gateWarningView{
@@ -332,13 +425,20 @@ func (s *Server) buildTaskGates(r *http.Request, runID string) (taskGatesRespons
 	return response, nil
 }
 
+// gateRetryKey identifies a retry offer within one wave: the same gate name may
+// be configured in both chains, but an entry attempt is not an exit attempt.
+type gateRetryKey struct {
+	Phase workflow.GatePhase
+	Gate  string
+}
+
 // offeredGateRetries lists the gates a pending check decision of the stage
-// really offers to retry on the given result version. A gate that is
-// technically failed but not in the payload (an advisory one, an older
+// really offers to retry on the given result version and chain phase. A gate
+// that is technically failed but not in the payload (an advisory one, an older
 // version, no pending decision) must not get a retry button: the retry would
 // end in a conflict.
-func offeredGateRetries(pending []approval.PendingApproval, stageID, sha string) map[string]bool {
-	offered := map[string]bool{}
+func offeredGateRetries(pending []approval.PendingApproval, stageID, sha string, phase workflow.GatePhase) map[gateRetryKey]bool {
+	offered := map[gateRetryKey]bool{}
 	for _, value := range pending {
 		if value.Kind != approval.KindCheckDecision || value.Trigger != approval.StageCheckTrigger ||
 			value.FromStage != stageID || value.Status != approval.StatusPending ||
@@ -350,7 +450,7 @@ func offeredGateRetries(pending []approval.PendingApproval, stageID, sha string)
 			continue
 		}
 		for _, gate := range payload.RetryableGates {
-			offered[gate] = true
+			offered[gateRetryKey{Phase: phase.Effective(), Gate: gate}] = true
 		}
 	}
 	return offered

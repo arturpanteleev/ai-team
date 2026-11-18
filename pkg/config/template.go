@@ -113,11 +113,11 @@ func (s *TemplateStage) UnmarshalYAML(node *yaml.Node) error {
 	return nil
 }
 
-// MarshalYAML keeps the stage's gate chain as the single source of truth for
-// every schema whose stages already use gate references (v6 and v7). Config's
-// MarshalYAML normalizes v6 stages itself; this covers v7 configs, whose
-// schema version is newer than the constant it compares against, so that a
-// v7 template round-trips instead of emitting both spellings at once.
+// MarshalYAML keeps the stage's gate chain as the single source of truth when
+// a stage is serialized directly. Config.MarshalYAML normalizes every stage of
+// a gate-aware config (v6 and v7) itself; this is the safety net for callers
+// that marshal a stage outside a Config, where the schema version is unknown
+// and an explicit chain must not be emitted alongside the v5 fields.
 func (s TemplateStage) MarshalYAML() (any, error) {
 	type plain TemplateStage
 	out := plain(s)

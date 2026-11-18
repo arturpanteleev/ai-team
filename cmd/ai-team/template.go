@@ -12,7 +12,7 @@ import (
 
 // cmdTemplate — разовая работа с происхождением шаблонов. Сейчас единственная
 // подкоманда — audit: она показывает сохранённые версии, чьи команды и
-// инфраструктура не имеют якоря доверия в файловом конфиге.
+// инфраструктура не совпадают с доверенным файловым конфигом.
 func cmdTemplate() {
 	if len(os.Args) < 3 {
 		fatal("template требует подкоманду: audit")
@@ -25,8 +25,9 @@ func cmdTemplate() {
 	}
 }
 
-// cmdTemplateAudit — dry-run по умолчанию: печатает список версий без якоря
-// доверия с идентификатором (SHA-256 версии) и причиной. Явный --rewrite
+// cmdTemplateAudit — dry-run по умолчанию: печатает список версий с
+// недоверенными командами или инфраструктурой с идентификатором (SHA-256
+// версии) и причиной. Явный --rewrite
 // пересохраняет только выбранные версии через доверенный файловый якорь, не
 // изменяя .ai-team/config.yaml. Без --rewrite команда ничего не записывает.
 func cmdTemplateAudit() {
@@ -56,10 +57,11 @@ func cmdTemplateAudit() {
 
 func printTemplateAudit(findings []config.TemplateVersionAudit) {
 	if len(findings) == 0 {
-		fmt.Println("Сохранённых версий шаблона без якоря доверия не найдено. Ничего не изменено.")
+		fmt.Println("Версий с недоверенными командами или инфраструктурой не найдено. Ничего не изменено.")
+		fmt.Println("Чистые версии без якоря доверия запускаются по общему правилу: аудит отмечает только команды и инфраструктуру сверх доверенного файлового конфига.")
 		return
 	}
-	fmt.Printf("Найдено %d сохранённых версий шаблона без якоря доверия (dry-run, ничего не изменено):\n", len(findings))
+	fmt.Printf("Найдено %d версий шаблона с проблемами доверия (dry-run, ничего не изменено):\n", len(findings))
 	for _, finding := range findings {
 		fmt.Printf("  - %s: %s\n", finding.Version, strings.Join(finding.Problems, "; "))
 	}
@@ -77,7 +79,7 @@ func rewriteTemplateVersions(store *config.TemplateStore, findings []config.Temp
 		}
 	}
 	if len(ids) == 0 {
-		fmt.Println("Пересохранять нечего: версий без якоря доверия нет.")
+		fmt.Println("Пересохранять нечего: версий с недоверенными командами или инфраструктурой не найдено.")
 		return
 	}
 	for _, id := range ids {

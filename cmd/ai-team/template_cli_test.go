@@ -106,6 +106,55 @@ func TestTemplateAuditDryRunThenExplicitRewrite(t *testing.T) {
 	}
 }
 
+// A clean stored version has no trust anchor, but it is not a finding: the
+// audit is about commands and infrastructure, and such a version runs under
+// the general trusted-config rule.
+func TestTemplateAuditCleanVersionWithoutAnchor(t *testing.T) {
+	target := t.TempDir()
+	if err := os.Mkdir(filepath.Join(target, ".ai-team"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	active := "schema_version: 6\ntemplate: t\ntitle: T\nstages:\n  - {id: spec, title: Spec, function: po, result: md, executor: human}\n"
+	activePath := filepath.Join(target, ".ai-team", "config.yaml")
+	if err := os.WriteFile(activePath, []byte(active), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store, err := config.NewTemplateStore(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, version, err := store.ReadCurrent()
+	if err != nil {
+		t.Fatal(err)
+	}
+	clean := strings.Replace(active, "title: T", "title: Clean", 1)
+	if _, err := store.Publish([]byte(clean), version); err != nil {
+		t.Fatal(err)
+	}
+	// Restore a hand-written active config so the published clean version is
+	// the only stored version under audit.
+	if err := os.WriteFile(activePath, []byte(active), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cleanVersion := config.TemplateVersionID([]byte(clean))
+	marker := filepath.Join(target, ".ai-team", "templates", "trusted-versions", cleanVersion)
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("the clean version must have no trust anchor: %v", err)
+	}
+
+	stdout, code, stderr := runCLI(t, "template", "audit", "--target", target)
+	if code != 0 {
+		t.Fatalf("template audit: code=%d stderr=%s", code, stderr)
+	}
+	if !strings.Contains(stdout, "Версий с недоверенными командами или инфраструктурой не найдено") ||
+		!strings.Contains(stdout, "Чистые версии без якоря доверия запускаются по общему правилу") {
+		t.Fatalf("the empty audit must explain that clean versions without an anchor are fine: %s", stdout)
+	}
+	if strings.Contains(stdout, cleanVersion) {
+		t.Fatalf("a clean version without an anchor must not be a finding: %s", stdout)
+	}
+}
+
 func TestTemplateAuditHelpAndDispatch(t *testing.T) {
 	stdout, code, stderr := runCLI(t, "--help")
 	if code != 0 {

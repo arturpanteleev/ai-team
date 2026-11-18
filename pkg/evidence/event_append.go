@@ -79,6 +79,10 @@ func validateEventAppend(events []Event, runID, runDir string, candidate Event, 
 		if err := validateAutoCheckRetryEvent(events, candidate); err != nil {
 			return Event{}, false, err
 		}
+	} else if controllerOwned && candidate.Type == "gate_pins_recorded" {
+		if err := validateGatePinsEvent(candidate); err != nil {
+			return Event{}, false, err
+		}
 	} else if !controllerOwned || candidate.Type != "stage_skipped" {
 		if err := ValidateWorkerEventType(candidate.Type); err != nil {
 			return Event{}, false, err
@@ -243,6 +247,60 @@ func validateAutoCheckRetryEvent(events []Event, candidate Event) error {
 		return errors.New("auto_check_retry is not bound to a failed check report")
 	}
 	return nil
+}
+
+// validateGatePinsEvent keeps the controller-owned gate pin record strictly
+// typed. It is an extension event replay ignores, so the ordinary worker
+// append boundary rejects it; only the trusted controller path may write it,
+// and even there the payload must be exactly the pin manifest the controller
+// derived from its pinned config.
+func validateGatePinsEvent(candidate Event) error {
+	if candidate.Stage != "" || candidate.AttemptID != "" {
+		return errors.New("gate_pins_recorded must not bind a stage or attempt")
+	}
+	template, ok := candidate.Data["template"].(string)
+	if !ok || template == "" {
+		return errors.New("gate_pins_recorded requires a template")
+	}
+	rawPins, ok := candidate.Data["pins"].([]any)
+	if !ok || len(rawPins) == 0 {
+		return errors.New("gate_pins_recorded requires at least one pin")
+	}
+	for _, raw := range rawPins {
+		pin, ok := raw.(map[string]any)
+		if !ok || len(pin) != 4 {
+			return errors.New("gate_pins_recorded pin payload is invalid")
+		}
+		gate, gateOK := pin["gate"].(string)
+		_, versionOK := gatePinVersion(pin["version"])
+		kind, kindOK := pin["kind"].(string)
+		digest, digestOK := pin["digest"].(string)
+		if !gateOK || gate == "" || !versionOK || !kindOK || kind == "" || !digestOK || !validSHA256(digest) {
+			return errors.New("gate_pins_recorded pin identity is invalid")
+		}
+	}
+	if late, present := candidate.Data["late"]; present {
+		if _, ok := late.(bool); !ok {
+			return errors.New("gate_pins_recorded late marker must be boolean")
+		}
+	}
+	for key := range candidate.Data {
+		if key != "template" && key != "pins" && key != "late" {
+			return errors.New("gate_pins_recorded payload has unexpected fields")
+		}
+	}
+	return nil
+}
+
+func gatePinVersion(value any) (int, bool) {
+	switch version := value.(type) {
+	case int:
+		return version, version >= 1
+	case float64:
+		return int(version), version >= 1 && version <= float64(1<<31-1) && version == float64(int(version))
+	default:
+		return 0, false
+	}
 }
 
 func validEventRelativePath(value string) bool {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -24,6 +25,7 @@ import (
 	"github.com/arturpanteleev/ai-team/pkg/approval"
 	"github.com/arturpanteleev/ai-team/pkg/attest"
 	"github.com/arturpanteleev/ai-team/pkg/candidate"
+	"github.com/arturpanteleev/ai-team/pkg/config"
 	"github.com/arturpanteleev/ai-team/pkg/containment"
 	"github.com/arturpanteleev/ai-team/pkg/delivery"
 	"github.com/arturpanteleev/ai-team/pkg/evidence"
@@ -67,6 +69,9 @@ const (
 	workerAPIFutureSkew              = 5 * time.Second
 	workerAPIMaxNonces               = 4096
 	workerHumanInputTrigger          = "human_input"
+	// workerGatePinsEventType is a controller-owned gate-contract extension
+	// event. It is never accepted through the generic worker event append.
+	workerGatePinsEventType = "gate_pins_recorded"
 )
 
 const WorkerAPIAddressEnv = workerAPIAddressEnv
@@ -709,7 +714,7 @@ func (s *workerAPIServer) handle(w http.ResponseWriter, r *http.Request) {
 	if request.Method == "attempt_manifest.write" {
 		payloadLimit = workerAPIMaxAttemptManifestPayload
 	}
-	if request.Method == "event_log.append" || request.Method == "event_log.description_missing" {
+	if request.Method == "event_log.append" || request.Method == "event_log.description_missing" || request.Method == "event_log.gate_pins" {
 		payloadLimit = workerAPIMaxEventAppendPayload
 	}
 	if len(request.Payload) > 0 && strictjson.Unmarshal(request.Payload, int64(payloadLimit), &call) != nil {
@@ -742,7 +747,7 @@ func workerAPIRequestBodyLimit(method string, size int) int {
 		return workerAPIMaxCandidateEvidenceBody
 	case "attempt_manifest.write", "attempt_manifest.read":
 		return workerAPIMaxAttemptManifestEnvelope
-	case "event_log.append", "event_log.description_missing":
+	case "event_log.append", "event_log.description_missing", "event_log.gate_pins":
 		return workerAPIMaxEventAppendEnvelope
 	default:
 		if size <= workerAPIMaxBody {
@@ -1045,6 +1050,39 @@ func (s *workerAPIServer) dispatchContext(ctx context.Context, method string, c 
 			s.eventSnapshotToken = ""
 		}
 		return page, nil
+	case "event_log.gate_pins":
+		if !s.usageAllowed || s.eventLogs == nil || s.lifecycle == nil {
+			return nil, errors.New("controller gate pin append requires bubblewrap Unix transport")
+		}
+		if c.RunID != s.scope.RunID {
+			return nil, errors.New("gate pin append run mismatch")
+		}
+		switch s.scope.Operation {
+		case OperationStart, OperationResume, OperationRecover:
+		default:
+			return nil, fmt.Errorf("gate pin append is not allowed for operation %q", s.scope.Operation)
+		}
+		event, err := s.controllerGatePinsEvent(c.RunID, c.Event.Timestamp)
+		if err != nil {
+			return nil, err
+		}
+		appender, ok := s.eventLogs.(interface {
+			AppendControllerEvent(string, evidence.Event, uint64, string) (evidence.Event, error)
+		})
+		if !ok {
+			return nil, errors.New("event log does not support controller-only appends")
+		}
+		appended, err := appender.AppendControllerEvent(c.RunID, event, c.ExpectedSequence, c.ExpectedPreviousSHA256)
+		if err != nil {
+			return nil, err
+		}
+		s.eventSnapshot = nil
+		s.eventSnapshotToken = ""
+		return workerAPIEventAppendResult{
+			SchemaVersion: appended.SchemaVersion, Sequence: appended.Sequence, RunID: appended.RunID,
+			Type: appended.Type, Stage: appended.Stage, AttemptID: appended.AttemptID, Timestamp: appended.Timestamp,
+			PreviousSHA256: appended.PreviousSHA256, SHA256: appended.SHA256,
+		}, nil
 	case "event_log.append", "event_log.description_missing":
 		if !s.usageAllowed || s.eventLogs == nil {
 			return nil, errors.New("controller event log appends require bubblewrap Unix transport")
@@ -1477,6 +1515,51 @@ func (s *workerAPIServer) dispatchContext(ctx context.Context, method string, c 
 		return nil, fmt.Errorf("worker API method %q is not allowed", method)
 	}
 	return nil, nil
+}
+
+// controllerGatePinsEvent rebuilds the gate pin record from controller-owned
+// state. The worker supplies no pin data: its only input is the timestamp to
+// bind, so a forged pin list cannot enter the durable log. The pinned config
+// snapshot is verified against the controller's lifecycle digest before it is
+// used, which keeps the fail-closed digest comparison across restarts intact.
+func (s *workerAPIServer) controllerGatePinsEvent(runID string, at time.Time) (evidence.Event, error) {
+	state, err := s.lifecycle.Load(runID)
+	if err != nil {
+		return evidence.Event{}, fmt.Errorf("gate pins lifecycle state: %w", err)
+	}
+	if state.ConfigSHA256 == "" || len(state.ConfigSHA256) != 64 {
+		return evidence.Event{}, errors.New("gate pins config digest is unavailable")
+	}
+	runDir := filepath.Join(s.scope.TargetDir, ".ai-team", "runs", runID)
+	data, err := safeio.ReadRegularFile(filepath.Join(runDir, "config.json"), 8<<20)
+	if err != nil {
+		return evidence.Event{}, fmt.Errorf("gate pins pinned config: %w", err)
+	}
+	digest := sha256.Sum256(data)
+	if hex.EncodeToString(digest[:]) != state.ConfigSHA256 {
+		return evidence.Event{}, errors.New("gate pins pinned config digest mismatch")
+	}
+	var cfg config.Config
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return evidence.Event{}, fmt.Errorf("gate pins pinned config decode: %w", err)
+	}
+	pins, err := cfg.GatePins()
+	if err != nil {
+		return evidence.Event{}, fmt.Errorf("gate pins resolve: %w", err)
+	}
+	if len(pins) == 0 {
+		return evidence.Event{}, errors.New("gate pins pinned config has no gates")
+	}
+	items := make([]any, len(pins))
+	for i, pin := range pins {
+		items[i] = map[string]any{
+			"gate": pin.Gate, "version": float64(pin.Version), "kind": string(pin.Kind), "digest": pin.Digest,
+		}
+	}
+	return evidence.Event{
+		Type: workerGatePinsEventType, Timestamp: at.UTC(),
+		Data: map[string]any{"template": cfg.Template, "pins": items},
+	}, nil
 }
 
 func (s *workerAPIServer) validateControllerDescriptionMissing(event evidence.Event, events []evidence.Event) error {
@@ -2305,6 +2388,22 @@ func (s *workerAPIEventLog) Append(runID string, event evidence.Event, expectedS
 	}
 	if runID != s.port.scope.RunID {
 		return evidence.Event{}, errors.New("worker event log API run mismatch")
+	}
+	if event.Type == workerGatePinsEventType {
+		// Gate pins are controller-owned extension events. The worker sends
+		// only the timestamp it wants bound to the record; the controller
+		// recomputes the pins from the durable pinned config and writes the
+		// canonical event through its trusted append path. Nothing from the
+		// worker-supplied pin payload is forwarded.
+		var result workerAPIEventAppendResult
+		request := evidence.Event{Timestamp: event.Timestamp}
+		if err := s.port.call("event_log.gate_pins", workerAPICall{
+			RunID: runID, Event: request, ExpectedSequence: expectedSequence,
+			ExpectedPreviousSHA256: expectedPreviousSHA256,
+		}, &result); err != nil {
+			return evidence.Event{}, err
+		}
+		return workerAPIEventFromAppendResult(result), nil
 	}
 	if event.Type == "attempt_started" && event.Data["executor"] == "human" {
 		// Human authority fields are never forwarded as worker event data. The

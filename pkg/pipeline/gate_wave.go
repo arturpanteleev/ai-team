@@ -617,6 +617,12 @@ func ruleStatus(attempt workflow.GateAttempt) string {
 // verifies that the library still has the same bytes for each pinned
 // definition. The template snapshot already names exact versions; the digests
 // prove that "id@version" still means what it meant when the task began.
+//
+// The record is an extension event replay ignores, so the worker-facing event
+// append boundary rejects it. When the pipeline runs in a distributed worker,
+// the scoped event log routes this append to a controller-only RPC: the worker
+// supplies no pin payload and the controller rebuilds the record from the
+// hash-verified config snapshot before appending it to the canonical log.
 func (rs *runState) recordGatePins() error {
 	pins, err := rs.p.cfg.GatePins()
 	if err != nil {

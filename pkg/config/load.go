@@ -425,9 +425,10 @@ func (c *Config) Marshal() ([]byte, error) {
 }
 
 // MarshalYAML writes the stages in the spelling of the config's schema
-// version: v6 writes exit_gate_groups (translating legacy fields when the
-// config was built in memory from them) and never the v5 keys; v5 writes the
-// legacy keys only.
+// version: v6 and v7 write exit_gate_groups (translating legacy fields when
+// the config was built in memory from them) and never the v5 keys; v5 writes
+// the legacy keys only. Schema v7 additionally keeps its workflow catalog and
+// the selected workflow; a v5/v6 file never gets a workflow block written.
 func (c *Config) MarshalYAML() (any, error) {
 	type plain Config
 	out := plain(*c)
@@ -440,11 +441,25 @@ func (c *Config) MarshalYAML() (any, error) {
 	}
 	out.Stages = make([]TemplateStage, len(c.Stages))
 	for i, stage := range c.Stages {
-		if c.SchemaVersion == CurrentSchemaVersion {
-			stage.ExitGateGroups = stage.EffectiveGateGroups()
+		if gateAwareSchemaVersion(c.SchemaVersion) {
+			// v6/v7 have no v5 gate spelling. Legacy fields can only reach a
+			// gate-aware config from an in-memory v5-derived template, so
+			// translate them into the explicit chain and drop the old keys.
+			// An empty Confirm is "not set" (the web process patch strips the
+			// field derived by ParseYAML before publishing): on v7 it must not
+			// grow a human_approval out of the stage result type.
+			if c.SchemaVersion == CurrentSchemaVersion || hasLegacyGateFields(stage) {
+				stage.ExitGateGroups = stage.EffectiveGateGroups()
+			}
 			stage.RequiredSections, stage.Check, stage.Confirm = nil, nil, ""
 		}
 		out.Stages[i] = stage
 	}
 	return out, nil
+}
+
+// hasLegacyGateFields reports whether a stage carries the schema-v5 gate
+// spelling that a gate-aware schema has to translate before writing it.
+func hasLegacyGateFields(s TemplateStage) bool {
+	return len(s.RequiredSections) > 0 || s.Check != nil || s.Confirm != ""
 }

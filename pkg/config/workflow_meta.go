@@ -61,10 +61,16 @@ type WorkflowMeta struct {
 
 // WorkflowGraph is one graph of a workflow's graph set.
 type WorkflowGraph struct {
-	ID          string                    `yaml:"id"`
-	Title       string                    `yaml:"title,omitempty"`
-	Template    string                    `yaml:"template,omitempty"`
-	Entry       string                    `yaml:"entry,omitempty"`
+	ID       string `yaml:"id"`
+	Title    string `yaml:"title,omitempty"`
+	Template string `yaml:"template,omitempty"`
+	Entry    string `yaml:"entry,omitempty"`
+	// Stages is the ordered subset of the template's stages this graph
+	// travels. Empty keeps the historical behavior (all template stages), so
+	// v5/v6 configs and catalogs that declare no subsets are unchanged.
+	// Transitions chain graphs in execution order; only their stage subsets
+	// compile into the run graph (schema v7).
+	Stages      []string                  `yaml:"stages,omitempty"`
 	Transitions []WorkflowGraphTransition `yaml:"transitions,omitempty"`
 }
 
@@ -94,7 +100,7 @@ func (m *WorkflowMeta) UnmarshalYAML(node *yaml.Node) error {
 
 func (g *WorkflowGraph) UnmarshalYAML(node *yaml.Node) error {
 	if err := validateMappingKeys(node, map[string]bool{
-		"id": true, "title": true, "template": true, "entry": true, "transitions": true,
+		"id": true, "title": true, "template": true, "entry": true, "stages": true, "transitions": true,
 	}, "config: workflow graph"); err != nil {
 		return err
 	}
@@ -189,6 +195,136 @@ func (c *Config) workflowByID(id string) *WorkflowMeta {
 		}
 	}
 	return nil
+}
+
+// graphPlan is the flattened run path of a workflow: an ordered stage subset
+// and the entry stage of the first graph of the chain.
+type graphPlan struct {
+	stageIDs []string
+	entry    string
+}
+
+// workflowGraphPlan compiles the declared graph chain of one workflow into a
+// stage subset. A workflow without a `stages` list on any graph keeps the
+// historical full-template behavior (v5/v6 and catalogs that only vary gates).
+// The chain follows transitions on `passed` from the single graph that is not
+// a transition target; its flattened stages are the run path.
+func (c *Config) workflowGraphPlan(wf WorkflowMeta) (graphPlan, error) {
+	var plan graphPlan
+	hasSubset := false
+	for _, graph := range wf.Graphs {
+		if len(graph.Stages) > 0 {
+			hasSubset = true
+			break
+		}
+	}
+	if !hasSubset || len(c.Stages) == 0 {
+		// A legacy in-memory config has no template stages to subset; its
+		// CompiledGraph follows the old WorkflowConfig instead.
+		return plan, nil
+	}
+
+	index := make(map[string]int, len(c.Stages))
+	for i, stage := range c.Stages {
+		index[stage.ID] = i
+	}
+	byID := make(map[string]WorkflowGraph, len(wf.Graphs))
+	for _, graph := range wf.Graphs {
+		if _, exists := byID[graph.ID]; exists {
+			return plan, fmt.Errorf("workflow %s: граф %q объявлен дважды", wf.ID, graph.ID)
+		}
+		byID[graph.ID] = graph
+		for _, stageID := range graph.Stages {
+			if _, exists := index[stageID]; !exists {
+				return plan, fmt.Errorf("workflow %s: graphs[%s] этап %q не найден в шаблоне", wf.ID, graph.ID, stageID)
+			}
+		}
+		if graph.Entry != "" && len(graph.Stages) > 0 {
+			inside := false
+			for _, stageID := range graph.Stages {
+				inside = inside || stageID == graph.Entry
+			}
+			if !inside {
+				return plan, fmt.Errorf("workflow %s: graphs[%s] entry %q не входит в stages", wf.ID, graph.ID, graph.Entry)
+			}
+		}
+	}
+
+	targets := map[string]bool{}
+	for _, graph := range wf.Graphs {
+		for _, transition := range graph.Transitions {
+			targets[transition.To] = true
+		}
+	}
+	var roots []WorkflowGraph
+	for _, graph := range wf.Graphs {
+		if !targets[graph.ID] {
+			roots = append(roots, graph)
+		}
+	}
+	if len(roots) != 1 {
+		return plan, fmt.Errorf("workflow %s: цепочка графов должна иметь ровно один entry-граф, получено %d", wf.ID, len(roots))
+	}
+
+	seen := map[string]bool{}
+	var chain []WorkflowGraph
+	current := roots[0]
+	for {
+		if seen[current.ID] {
+			return plan, fmt.Errorf("workflow %s: цикл цепочки графов через %q", wf.ID, current.ID)
+		}
+		seen[current.ID] = true
+		chain = append(chain, current)
+		var nextID string
+		for _, transition := range current.Transitions {
+			if transition.From != "" && transition.From != current.ID {
+				return plan, fmt.Errorf("workflow %s: graphs[%s] переход from %q не совпадает с графом", wf.ID, current.ID, transition.From)
+			}
+			if nextID != "" {
+				return plan, fmt.Errorf("workflow %s: graphs[%s] несколько переходов на passed", wf.ID, current.ID)
+			}
+			nextID = transition.To
+		}
+		if nextID == "" {
+			break
+		}
+		next, exists := byID[nextID]
+		if !exists {
+			return plan, fmt.Errorf("workflow %s: graphs[%s] переход → неизвестный граф %q", wf.ID, current.ID, nextID)
+		}
+		current = next
+	}
+	for _, graph := range wf.Graphs {
+		if !seen[graph.ID] {
+			return plan, fmt.Errorf("workflow %s: граф %q недостижим из entry-графа", wf.ID, graph.ID)
+		}
+	}
+
+	used := map[string]string{}
+	for _, graph := range chain {
+		for _, stageID := range graph.Stages {
+			if owner, exists := used[stageID]; exists {
+				return plan, fmt.Errorf("workflow %s: этап %q объявлен в графах %s и %s", wf.ID, stageID, owner, graph.ID)
+			}
+			used[stageID] = graph.ID
+			plan.stageIDs = append(plan.stageIDs, stageID)
+		}
+	}
+	plan.entry = roots[0].Entry
+	if plan.entry == "" {
+		if len(roots[0].Stages) == 0 {
+			return plan, fmt.Errorf("workflow %s: entry-граф %q должен объявить entry или stages", wf.ID, roots[0].ID)
+		}
+		plan.entry = roots[0].Stages[0]
+	}
+	inside := false
+	for _, stageID := range plan.stageIDs {
+		inside = inside || stageID == plan.entry
+	}
+	if !inside {
+		return plan, fmt.Errorf("workflow %s: entry %q не входит в поднабор этапов", wf.ID, plan.entry)
+	}
+	return plan, nil
 }
 
 // validateWorkflows checks the metadata block and resolves every workflow's
@@ -385,6 +521,12 @@ func (c *Config) EntryGateGroupsFor(stage TemplateStage) (workflow.GateGroups, e
 // (explicit exit_gate_groups or the legacy v5 translation): workflow exit gates
 // are prepended, and same-name stage refs replace them. A stage without an
 // explicit chain still receives the workflow's exit gates.
+//
+// A workflow-wide human_approval is only a fallback: if the stage already
+// declares its own human_approval (for example po_approval or
+// reviewer_approval), the workflow instance is dropped instead of asking for
+// two independent decisions on one transition. Overrides by instance name
+// still work for every other gate.
 func (c *Config) ExitGateGroupsFor(stage TemplateStage) (workflow.GateGroups, error) {
 	chain, err := c.WorkflowGateGroups(c.ActiveWorkflowID(), false)
 	if err != nil {
@@ -392,15 +534,22 @@ func (c *Config) ExitGateGroupsFor(stage TemplateStage) (workflow.GateGroups, er
 	}
 	stageGroups := stage.EffectiveGateGroups()
 	overridden := map[string]bool{}
+	stageHasHumanGate := false
 	for _, group := range stageGroups {
 		for _, ref := range group {
 			overridden[ref.InstanceName()] = true
+			if ref.Gate == gatelib.GateHumanApproval {
+				stageHasHumanGate = true
+			}
 		}
 	}
 	var merged workflow.GateGroups
 	for _, group := range chain {
 		var kept workflow.GateGroup
 		for _, ref := range group {
+			if stageHasHumanGate && ref.Gate == gatelib.GateHumanApproval {
+				continue
+			}
 			if !overridden[ref.InstanceName()] {
 				kept = append(kept, ref)
 			}

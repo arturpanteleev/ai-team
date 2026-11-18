@@ -2,11 +2,67 @@ package evidence
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/arturpanteleev/ai-team/pkg/workflow"
 )
+
+func TestGatePinsAppendIsControllerOwned(t *testing.T) {
+	const runID = "gates-pins-append"
+	target := t.TempDir()
+	store, err := Start(filepath.Join(target, "runs"), testRunManifest(runID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now().UTC()
+	if err := store.Append(Event{Type: "run_started", Timestamp: started}); err != nil {
+		t.Fatal(err)
+	}
+	events, err := store.ReadEvents()
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := strings.Repeat("a", 64)
+	payload := map[string]any{
+		"template": "fixture",
+		"pins": []any{map[string]any{
+			"gate": "required_sections", "version": float64(1), "kind": "builtin", "digest": digest,
+		}},
+	}
+	candidate := Event{Type: "gate_pins_recorded", Timestamp: started.Add(time.Second), Data: payload}
+	sequence, previous := uint64(len(events)), events[len(events)-1].SHA256
+	if _, _, err := ValidateEventAppend(events, runID, store.RunDir(), candidate, sequence, previous, FilesystemAttemptManifestSource()); err == nil ||
+		!strings.Contains(err.Error(), "not allowed through worker API") {
+		t.Fatalf("worker append accepted controller-owned gate pins: %v", err)
+	}
+	if _, _, err := ValidateControllerEventAppend(events, runID, store.RunDir(), candidate, sequence, previous, FilesystemAttemptManifestSource()); err != nil {
+		t.Fatalf("controller gate pins append rejected: %v", err)
+	}
+	// A legacy config has no template; the honest empty string is accepted as
+	// long as the key is present and typed as a string.
+	legacy := candidate
+	legacy.Data = map[string]any{"template": "", "pins": payload["pins"]}
+	if _, _, err := ValidateControllerEventAppend(events, runID, store.RunDir(), legacy, sequence, previous, FilesystemAttemptManifestSource()); err != nil {
+		t.Fatalf("controller rejected legacy gate pins with empty template: %v", err)
+	}
+	for name, data := range map[string]map[string]any{
+		"missing template":    {"pins": payload["pins"]},
+		"non-string template": {"template": 123, "pins": payload["pins"]},
+		"empty pins":          {"template": "fixture", "pins": []any{}},
+		"bad digest": {"template": "fixture", "pins": []any{map[string]any{
+			"gate": "required_sections", "version": float64(1), "kind": "builtin", "digest": "short",
+		}}},
+		"extra field": {"template": "fixture", "pins": payload["pins"], "unexpected": true},
+	} {
+		bad := candidate
+		bad.Data = data
+		if _, _, err := ValidateControllerEventAppend(events, runID, store.RunDir(), bad, sequence, previous, FilesystemAttemptManifestSource()); err == nil {
+			t.Fatalf("controller accepted malformed gate pins: %s", name)
+		}
+	}
+}
 
 func TestValidateEventAppendAllowsPendingAgentFinishedForCandidateAttemptFinished(t *testing.T) {
 	const runID = "append-pending-agent-finished"

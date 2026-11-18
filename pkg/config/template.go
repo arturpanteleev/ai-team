@@ -475,21 +475,49 @@ func indexContains(index map[string]int, key string) bool { _, ok := index[key];
 // TemplateGraph compiles the ordered stages and backward return routes into a
 // graph keyed by stable stage IDs. Forward edges are always added in stage
 // order; return actions are grouped by source so several backward choices do
-// not create ambiguous outcome edges.
+// not create ambiguous outcome edges. The active workflow's declared graph
+// chain narrows the stages to its subset (schema v7); without a subset the
+// whole template is compiled, which keeps v5/v6 and gate-only workflows intact.
 func (c *Config) TemplateGraph() (workflow.Graph, error) {
 	graph := workflow.Graph{SchemaVersion: GraphSchemaVersion}
-	if len(c.Stages) == 0 {
+	plan, err := c.workflowGraphPlan(*c.ActiveWorkflowMeta())
+	if err != nil {
+		return graph, err
+	}
+	stages := c.Stages
+	if len(plan.stageIDs) > 0 {
+		byID := make(map[string]TemplateStage, len(c.Stages))
+		for _, stage := range c.Stages {
+			byID[stage.ID] = stage
+		}
+		stages = make([]TemplateStage, 0, len(plan.stageIDs))
+		for _, id := range plan.stageIDs {
+			stage, exists := byID[id]
+			if !exists {
+				return graph, fmt.Errorf("workflow graph: этап %q из поднабора workflow не найден в шаблоне", id)
+			}
+			stages = append(stages, stage)
+		}
+	}
+	if len(stages) == 0 {
 		return graph, fmt.Errorf("workflow graph: stages пуст")
 	}
-	graph.Entry = c.Stages[0].ID
-	for _, stage := range c.Stages {
+	graph.Entry = stages[0].ID
+	if plan.entry != "" {
+		graph.Entry = plan.entry
+	}
+	inSubset := make(map[string]bool, len(stages))
+	for _, stage := range stages {
+		inSubset[stage.ID] = true
+	}
+	for _, stage := range stages {
 		visits := 0
 		if c.MaxVisits != nil {
 			visits = c.MaxVisits[stage.ID]
 		}
 		if visits == 0 {
 			for _, route := range c.Returns {
-				if route.To == stage.ID {
+				if route.To == stage.ID && inSubset[route.From] {
 					visits = route.MaxVisits
 					if visits == 0 {
 						visits = 3
@@ -502,15 +530,17 @@ func (c *Config) TemplateGraph() (workflow.Graph, error) {
 	}
 	bySource := make(map[string][]string)
 	for _, route := range c.Returns {
-		bySource[route.From] = append(bySource[route.From], route.To)
+		if inSubset[route.From] && inSubset[route.To] {
+			bySource[route.From] = append(bySource[route.From], route.To)
+		}
 	}
 	for source := range bySource {
 		sort.Strings(bySource[source])
 	}
-	for i, stage := range c.Stages {
+	for i, stage := range stages {
 		next := workflow.TerminalComplete
-		if i+1 < len(c.Stages) {
-			next = c.Stages[i+1].ID
+		if i+1 < len(stages) {
+			next = stages[i+1].ID
 		}
 		// The approval belongs to the exit chain the controller actually runs:
 		// the active workflow's exit gates merged with the stage's own chain.
@@ -560,12 +590,12 @@ func (c *Config) TemplateGraph() (workflow.Graph, error) {
 		actions["reject"] = workflow.TerminalStop
 		graph.Edges = append(graph.Edges, workflow.Edge{
 			From: source, Outcome: workflow.OutcomeRejected, To: targets[0],
-			Approval: generatedApproval(stageFunction(c.Stages, source), targets[0], actions),
+			Approval: generatedApproval(stageFunction(stages, source), targets[0], actions),
 		})
 	}
 	// Этап, чей агент задаёт вопросы, при BLOCKED ждёт ответа Product Owner:
 	// переход blocked → этот же этап с согласованием answer_questions.
-	for _, stage := range c.Stages {
+	for _, stage := range stages {
 		if !c.QuestionStages[stage.ID] || hasBlockedEdge(graph.Edges, stage.ID) {
 			continue
 		}

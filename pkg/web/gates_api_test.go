@@ -39,6 +39,37 @@ stages:
     result: approve
 `
 
+// gatesAPIWorkflowTemplate pins a v7 config whose workflow declares both an
+// entry and an exit chain; the stage has its own exit gate as well.
+const gatesAPIWorkflowTemplate = `schema_version: 7
+template: gates-api-workflow
+title: Gates API Workflow
+workflow: gates-api-flow
+workflows:
+  - id: gates-api-flow
+    title: Gates API flow
+    version: 1
+    graphs:
+      - id: sdlc
+        template: gates-api-workflow
+    entry_gate_groups:
+      - - {gate: verdict_marker, version: 1, name: wf_entry_marker}
+    exit_gate_groups:
+      - - {gate: required_sections, version: 1, name: wf_exit_sections, params: {sections: [X]}}
+stages:
+  - id: build
+    title: Build
+    function: developer
+    result: md
+    input_artifacts: [md]
+    exit_gate_groups:
+      - - {gate: required_sections, version: 1, name: stage_sections, params: {sections: [Y]}}
+  - id: done
+    title: Done
+    function: bo
+    result: approve
+`
+
 const (
 	gatesTestSHA1 = "1111111111111111111111111111111111111111111111111111111111111111"
 	gatesTestSHA2 = "2222222222222222222222222222222222222222222222222222222222222222"
@@ -62,18 +93,26 @@ func (c *retryRecorder) OverrideStageCheck(context.Context, string, string, stri
 }
 
 func checkDecisionFor(status string, retryable bool) approval.PendingApproval {
-	actions := []string{"new_version", "override", "return"}
-	targets := map[string]string{"new_version": "build", "override": "build", "return": "build"}
+	retryableGates := []string(nil)
 	if retryable {
+		retryableGates = []string{"second"}
+	}
+	return checkDecisionForGates("build", gatesTestSHA1, status, retryableGates)
+}
+
+func checkDecisionForGates(stageID, sha, status string, retryableGates []string) approval.PendingApproval {
+	actions := []string{"new_version", "override", "return"}
+	targets := map[string]string{"new_version": stageID, "override": stageID, "return": stageID}
+	if len(retryableGates) > 0 {
 		actions = append(actions, approval.ActionRetryGate)
-		targets[approval.ActionRetryGate] = "build"
+		targets[approval.ActionRetryGate] = stageID
 	}
 	payload, _ := json.Marshal(approval.CheckDecisionPayload{
-		Kind: string(approval.KindCheckDecision), StageID: "build", CheckKind: "hard", Status: status,
-		ArtifactSHA256: gatesTestSHA1, RetryableGates: map[bool][]string{true: {"second"}, false: nil}[retryable],
+		Kind: string(approval.KindCheckDecision), StageID: stageID, CheckKind: "hard", Status: status,
+		ArtifactSHA256: sha, RetryableGates: retryableGates,
 	})
 	return approval.PendingApproval{
-		Kind: approval.KindCheckDecision, ID: "check-1", RunID: "run", AttemptID: "att-1", FromStage: "build", ToStage: "build",
+		Kind: approval.KindCheckDecision, ID: "check-1", RunID: "run", AttemptID: "att-1", FromStage: stageID, ToStage: stageID,
 		Trigger: approval.StageCheckTrigger, Status: approval.StatusPending, SubjectHash: testSubjectHash,
 		RequiredRoles: []string{"developer"}, Quorum: approval.QuorumAny, Actions: actions, Targets: targets,
 		CreatedAt: time.Now().UTC(), Payload: payload,
@@ -89,6 +128,16 @@ func newGatesFixture(t *testing.T, retryable bool) gatesFixture {
 	t.Helper()
 	base := newTemplateFixture(t, gatesAPITemplate, false,
 		[]approval.PendingApproval{checkDecisionFor("error", retryable)},
+		map[string]lifecycle.State{"run": {Phase: lifecycle.PhaseWaiting, NextStage: "build", PendingApprovalID: "check-1"}})
+	recorder := &retryRecorder{stageActionRecorder: base.controller}
+	base.srv.controller = recorder
+	return gatesFixture{functionPermissionFixture: base, recorder: recorder}
+}
+
+func newWorkflowGatesFixture(t *testing.T, retryableGates []string) gatesFixture {
+	t.Helper()
+	base := newTemplateFixture(t, gatesAPIWorkflowTemplate, false,
+		[]approval.PendingApproval{checkDecisionForGates("build", gatesTestSHA1, "error", retryableGates)},
 		map[string]lifecycle.State{"run": {Phase: lifecycle.PhaseWaiting, NextStage: "build", PendingApprovalID: "check-1"}})
 	recorder := &retryRecorder{stageActionRecorder: base.controller}
 	base.srv.controller = recorder
@@ -112,10 +161,17 @@ func (f gatesFixture) journal() *gatesched.EventJournal {
 func (f gatesFixture) attempt(t *testing.T, sha, name, gate string, mode workflow.GateMode, group, n int,
 	execution workflow.GateExecution, verdict workflow.GateVerdict) workflow.GateAttempt {
 	t.Helper()
-	key := gatesched.WaveKey{TaskID: "run", Stage: "build", Visit: 1, Scope: "att-" + sha[:1], ArtifactSHA256: sha}
+	return f.attemptWithPhase(t, "", sha, name, gate, mode, group, n, execution, verdict)
+}
+
+func (f gatesFixture) attemptWithPhase(t *testing.T, phase workflow.GatePhase, sha, name, gate string, mode workflow.GateMode, group, n int,
+	execution workflow.GateExecution, verdict workflow.GateVerdict) workflow.GateAttempt {
+	t.Helper()
+	key := gatesched.WaveKey{TaskID: "run", Stage: "build", Visit: 1, Scope: "att-" + sha[:1], ArtifactSHA256: sha, Phase: phase}
 	ref := workflow.GateRef{Gate: gate, Version: 1, Name: name, Mode: mode}
 	started := time.Now().UTC().Add(-time.Minute)
 	attempt := gatesched.NewAttempt(key, ref, workflow.GateDefinition{ID: gate, Version: 1, Kind: workflow.GateKindBuiltin, Title: gate}, group, n, started)
+	attempt.Phase = phase.Effective()
 	journal := f.journal()
 	if err := journal.Record(gatesched.Record{Type: gatesched.RecordStarted, Key: key, Attempt: attempt}); err != nil {
 		t.Fatal(err)
@@ -148,6 +204,15 @@ func (f gatesFixture) gate(stage gateStageView, name string) gatesched.GateStatu
 		}
 	}
 	return gatesched.GateStatus{}
+}
+
+func gatesStage(view taskGatesResponse, id string) gateStageView {
+	for _, stage := range view.Stages {
+		if stage.StageID == id {
+			return stage
+		}
+	}
+	return gateStageView{}
 }
 
 // Acceptance: the API shows real gates, an advisory fail as a warning that does
@@ -369,4 +434,111 @@ func TestGatesAPI_RetryableOnlyWhenTheDecisionOffersIt(t *testing.T) {
 			t.Fatalf("offered=%v but second.Retryable=%v", offered, second.Retryable)
 		}
 	}
+}
+
+// A config without workflow chains keeps its view: no entry groups, the same
+// stage groups and the effective exit phase on its waves.
+func TestGatesAPI_StageOnlyConfigKeepsItsShape(t *testing.T) {
+	f := newGatesFixture(t, false)
+	f.attempt(t, gatesTestSHA1, "required_sections", "required_sections", "", 0, 1, workflow.GateExecutionSucceeded, workflow.GateVerdictPass)
+
+	stage := gatesStage(f.get(t), "build")
+	if len(stage.EntryGroups) != 0 {
+		t.Fatalf("a stage-only config has no entry chain: %v", stage.EntryGroups)
+	}
+	if len(stage.Groups) != 2 || stage.Groups[0][0] != "required_sections" || stage.Groups[1][0] != "second" {
+		t.Fatalf("stage groups changed: %v", stage.Groups)
+	}
+	if len(stage.Waves) != 1 || stage.Waves[0].Phase != workflow.GatePhaseExit {
+		t.Fatalf("an old wave is the effective exit chain: %+v", stage.Waves)
+	}
+}
+
+// A workflow-level exit gate is part of the effective exit chain: it is shown
+// in the API and its technical failure is retriable through the stage endpoint.
+func TestGatesAPI_WorkflowExitGateIsVisibleAndRetryable(t *testing.T) {
+	f := newWorkflowGatesFixture(t, []string{"wf_exit_sections"})
+	f.attempt(t, gatesTestSHA1, "stage_sections", "required_sections", "", 0, 1, workflow.GateExecutionSucceeded, workflow.GateVerdictPass)
+	failed := f.attempt(t, gatesTestSHA1, "wf_exit_sections", "required_sections", "", 0, 1, workflow.GateExecutionError, "")
+
+	view := f.get(t)
+	stage := gatesStage(view, "build")
+	if stage.StageID == "" {
+		t.Fatalf("stages = %+v", view.Stages)
+	}
+	if len(stage.Groups) != 2 || len(stage.Groups[0]) != 1 || stage.Groups[0][0] != "wf_exit_sections" ||
+		len(stage.Groups[1]) != 1 || stage.Groups[1][0] != "stage_sections" {
+		t.Fatalf("the exit view must merge workflow and stage gates: %v", stage.Groups)
+	}
+	if stage.Current == nil || stage.Current.Phase != workflow.GatePhaseExit {
+		t.Fatalf("current wave must carry the exit phase: %+v", stage.Current)
+	}
+	status := f.gate(stage, "wf_exit_sections")
+	if !status.Retryable || status.Attempt == nil || status.Attempt.AttemptID != failed.AttemptID {
+		t.Fatalf("a failed workflow exit gate must be retryable: %+v", status)
+	}
+
+	response := f.requestAs(t, "dev@example.test", []cloudidentity.Role{cloudidentity.RoleDeveloper}, http.MethodPost,
+		"/api/runs/run/stages/build/gates/wf_exit_sections/retry", "")
+	if response.Code != http.StatusAccepted || len(f.recorder.retries) != 1 || f.recorder.retries[0][0] != "wf_exit_sections" {
+		t.Fatalf("retry of a workflow exit gate: %d %s retries=%v", response.Code, response.Body.String(), f.recorder.retries)
+	}
+}
+
+// An entry gate is a separate wave with its own phase. It must be advertised
+// with the entry chain, and must not borrow an exit gate's identity.
+func TestGatesAPI_EntryGateIsVisibleWithPhase(t *testing.T) {
+	f := newWorkflowGatesFixture(t, nil)
+	f.attemptWithPhase(t, workflow.GatePhaseEntry, gatesTestSHA1, "wf_entry_marker", "verdict_marker", "", 0, 1,
+		workflow.GateExecutionSucceeded, workflow.GateVerdictFail)
+
+	stage := gatesStage(f.get(t), "build")
+	if len(stage.EntryGroups) != 1 || len(stage.EntryGroups[0]) != 1 || stage.EntryGroups[0][0] != "wf_entry_marker" {
+		t.Fatalf("entry groups = %v", stage.EntryGroups)
+	}
+	if len(stage.Waves) != 1 {
+		t.Fatalf("waves = %+v", stage.Waves)
+	}
+	wave := stage.Waves[0]
+	if wave.Phase != workflow.GatePhaseEntry || len(wave.Gates) != 1 || wave.Gates[0].GateName != "wf_entry_marker" {
+		t.Fatalf("the entry gate must resolve against the entry chain: %+v", wave)
+	}
+
+	response := f.requestAs(t, "admin-1", []cloudidentity.Role{cloudidentity.RoleAdmin}, http.MethodGet, "/api/runs/run/gates", "")
+	if !strings.Contains(response.Body.String(), `"phase":"entry"`) {
+		t.Fatalf("the API must expose the gate phase: %s", response.Body.String())
+	}
+}
+
+// The retry of an attempt is validated against the chain of that attempt's
+// phase: an entry gate cannot hide behind a same-named exit gate and vice versa.
+func TestGateRetryByAttemptUsesTheAttemptPhase(t *testing.T) {
+	t.Run("entry attempt is validated against the entry chain", func(t *testing.T) {
+		f := newWorkflowGatesFixture(t, []string{"wf_entry_marker"})
+		attempt := f.attemptWithPhase(t, workflow.GatePhaseEntry, gatesTestSHA1, "wf_entry_marker", "verdict_marker", "", 0, 1,
+			workflow.GateExecutionError, "")
+		response := f.requestAs(t, "dev@example.test", []cloudidentity.Role{cloudidentity.RoleDeveloper}, http.MethodPost,
+			"/api/runs/run/gate-attempts/"+attempt.AttemptID+"/retry", "")
+		if response.Code != http.StatusAccepted || len(f.recorder.retries) != 1 || f.recorder.retries[0][0] != "wf_entry_marker" {
+			t.Fatalf("entry attempt retry: %d %s retries=%v", response.Code, response.Body.String(), f.recorder.retries)
+		}
+	})
+	t.Run("an exit gate name in an entry wave is not an entry gate", func(t *testing.T) {
+		f := newWorkflowGatesFixture(t, []string{"stage_sections"})
+		attempt := f.attemptWithPhase(t, workflow.GatePhaseEntry, gatesTestSHA1, "stage_sections", "required_sections", "", 0, 1,
+			workflow.GateExecutionError, "")
+		response := f.requestAs(t, "dev@example.test", []cloudidentity.Role{cloudidentity.RoleDeveloper}, http.MethodPost,
+			"/api/runs/run/gate-attempts/"+attempt.AttemptID+"/retry", "")
+		if response.Code != http.StatusNotFound || len(f.recorder.retries) != 0 {
+			t.Fatalf("an entry attempt must not resolve an exit gate: %d %s retries=%v", response.Code, response.Body.String(), f.recorder.retries)
+		}
+	})
+	t.Run("the named-gate route stays on the exit chain", func(t *testing.T) {
+		f := newWorkflowGatesFixture(t, []string{"wf_entry_marker"})
+		response := f.requestAs(t, "dev@example.test", []cloudidentity.Role{cloudidentity.RoleDeveloper}, http.MethodPost,
+			"/api/runs/run/stages/build/gates/wf_entry_marker/retry", "")
+		if response.Code != http.StatusNotFound || len(f.recorder.retries) != 0 {
+			t.Fatalf("an entry gate must not be retried as an exit gate: %d %s retries=%v", response.Code, response.Body.String(), f.recorder.retries)
+		}
+	})
 }

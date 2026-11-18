@@ -98,6 +98,73 @@ SQLite/WebSocket projection, а lifecycle сохраняет exact следую�
 Resolved `workflow.json` содержит фактически исполненный graph; web detail
 читает этот immutable snapshot и показывает текущую позицию и policies.
 
+## Граф: класс, версия шаблона и прогон
+
+Схема v7 добавляет верхнеуровневый блок `workflows`: workflow — это **класс**
+процесса (набор графов), а run — один объект этого класса. У workflow нет
+модели: `model`/`effort`/`cli` принадлежат агентам и адаптерам. Граф живёт на
+трёх уровнях, и все три читаются одним типом `workflow.Graph`:
+
+1. **Класс.** `workflows[].graphs` объявляют `id`, `template`, `entry`,
+   `stages` (упорядоченный поднабор этапов шаблона, `WorkflowGraph.Stages`) и
+   `transitions` в другие графы. `Config.CompiledGraph()` компилирует граф с
+   цепочками гейтов активного workflow; `GET /api/graphs/{graphID}` (MCP
+   `get_graph`) отдаёт его без привязки к задаче. Цепочка графов имеет ровно
+   один entry-граф, этапы графов не пересекаются, а переход ссылается только
+   на уже объявленный граф.
+2. **Версия шаблона.** Публикация сохраняет неизменяемый снимок конфига; run
+   закрепляет его при старте и читает через `GET /api/runs/{id}/template-version`
+   (MCP `get_task_template_version`). Продолжение использует ту же версию.
+3. **Прогон.** `GET /api/runs/{id}/graph` (MCP `get_run_graph`) отдаёт тот же
+   скомпилированный граф с вычисленными статусами этапов и посещениями из
+   `pkg/stagestatus`; кастомных статусов графа не существует.
+
+Валидация графа (`Graph.Validate`) требует уникальных `(from, outcome)` рёбер,
+достижимости всех узлов из entry, пути до терминального узла, approval на
+каждом non-terminal ребре и положительного `max_visits` для узлов цикла.
+Каталог сценариев — `GET /api/workflows` и `GET /api/workflows/{workflowID}`
+(MCP `list_workflows`, `get_workflow`).
+
+### Входные гейты и цепочки сценария
+
+`entry_gate_groups` проверяют разрешённые входы этапа до вызова исполнителя:
+`gatesched.GuardExecute` вызывает executor не более одного раза и только если
+все обязательные гейты прошли. Входные цепочки verdict-only и не принимают
+`human_approval` — подтверждение относится к переходу, а не ко входу. Типы
+входов — `md` и `link` (`input_artifacts`).
+
+Эффективная цепочка этапа собирается из сценария и этапа: `extends` задаёт
+родителя (по умолчанию `idea-to-prod`), объявленная цепочка заменяет
+унаследованную, `entry_gate_overrides`/`exit_gate_overrides` точечно меняют
+гейт по имени экземпляра, а ссылки этапа того же имени вытесняют ссылки
+сценария. Две версии одного гейта в одной цепочке — ошибка конфига.
+
+### Controller-owned gate pins и RPC
+
+`Config.GatePins()` разрешает каждую ссылку шаблона (включая цепочки workflow)
+в точное определение `gatelib`: ID, версию, вид и SHA-256 канонического JSON.
+Контроллер один раз в начале run пишет событие `gate_pins_recorded` в
+canonical `events.jsonl` и при каждом старте/resume сверяет записанные digests
+с текущей библиотекой. Это extension-событие, которое typed replay
+игнорирует; worker не может его подделать.
+
+В распределённом режиме worker вызывает контроллерный RPC
+`event_log.gate_pins` без payload с пинами: контроллер сверяет digest
+закреплённого конфига с состоянием lifecycle, загружает конфиг, вычисляет
+пины сам и добавляет событие от своего имени. Обычный
+`event_log.append` с типом `gate_pins_recorded` на worker-границе
+отвергается.
+
+### Process-only patch workflow
+
+Карточка сценария в вебе (`web/src/pages/Workflows.tsx`, `WorkflowGraph.tsx`)
+позволяет править только `title` и `description` одного workflow через
+`POST /api/workflows/{workflowID}/process` (MCP `patch_workflow_process`).
+Сервер (`pkg/web/workflows.go`) загружает доверенный файловый конфиг и не
+принимает из веба YAML, команды, гейты или графы; `expected_version`
+(SHA-256) защищает от перезаписи. Право — PO или архитектор. Все остальные
+изменения процесса идут рецензируемым YAML в репозитории.
+
 ## Статусы этапов и история посещений (S11)
 
 `pkg/stagestatus` — одна **чистая** функция `Project(Input) Projection`: из

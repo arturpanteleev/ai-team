@@ -63,6 +63,8 @@ func SiteConfig() Config {
 				Description: "verify, export и redact для доказательств прогона"},
 			{Source: "docs/guides/dashboard.md", Section: SectionGuides, Weight: 4, URL: "/guides/dashboard/",
 				Description: "Прогоны, решения и артефакты в браузере"},
+			{Source: "docs/guides/workflows.md", Section: SectionGuides, Weight: 5, URL: "/guides/workflows/",
+				Description: "Workflow как класс графов, прогон, гейты и выбор сценария"},
 
 			{Source: "docs/reference/cli.md", Section: SectionReference, Weight: 0, URL: "/reference/cli/",
 				Description: "Все команды и флаги"},
@@ -74,6 +76,12 @@ func SiteConfig() Config {
 				Description: "Что значит каждый статус и код выхода"},
 			{Source: "docs/reference/security.md", Section: SectionReference, Weight: 4, URL: "/reference/security/",
 				Description: "Что ai-team гарантирует и чего не обещает"},
+			{Source: "docs/reference/mcp.md", Section: SectionReference, Weight: 5, URL: "/reference/mcp/",
+				Description: "Сетевой MCP: инструменты, ресурсы, авторизация и матрица паритета"},
+			{Source: "docs/reference/gate-protocol.md", Section: SectionReference, Weight: 6, URL: "/reference/gate-protocol/",
+				Description: "Протокол гейта, входные гейты и контракт артефактов"},
+			{Source: "docs/reference/TASK-FLOW-WEB-API.md", Title: "Web API task flow", Section: SectionReference, Weight: 7, URL: "/reference/task-flow-web-api/",
+				Description: "Маршруты REST/Web: задачи, этапы, гейты, события и метрики"},
 
 			{Source: "docs/ARCHITECTURE.md", Title: "Архитектура", Section: SectionInside, Weight: 0, URL: "/architecture/"},
 			{Source: "docs/MODULES.md", Title: "Карта модулей", Section: SectionInside, Weight: 1, URL: "/modules/"},

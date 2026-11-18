@@ -21,27 +21,56 @@
 
 ## Этапы по порядку
 
-Порядок в профиле `standard`:
+Порядок задаёт шаблон проекта (`schema_version` 5–7), а не имя агента. В
+встроенном `idea-to-prod` этапы идут так:
 
 ```text
-analyst → architect → coder → reviewer → tester → verifier → deployer
+intent → product_spec → tech_design → implementation → code_review → qa → deploy → observation → acceptance
 ```
 
-Профиль `fast` короче: `analyst → coder → tester → reviewer → deployer`.
-Различия профилей — в [Конфигурация](config.md#профили-init).
-
-| Этап | Что делает | Что пишет | Что может менять в проекте | Вердикт |
+| Этап | Функция | Исполнитель | Результат | Что происходит |
 |---|---|---|---|---|
-| `analyst` | превращает задачу в proposal: цели, требования, открытые вопросы и критерии приёмки; в терминале может задавать вам вопросы | `proposal.md` | ничего | — |
-| `architect` | пишет техническую спецификацию на основе согласованного proposal, технический дизайн и список задач | `specs/spec.md`, `design.md`, `tasks.md` | ничего | — |
-| `coder` | пишет код по дизайну | `coder.diff`, `unit-test-report.md` и изменения в проекте | любые файлы; изменения обязательны | `**Result:** PASS` или `FAIL` (в `unit-test-report.md`) |
-| `reviewer` | проверяет код на соответствие спецификации | `review.md` | ничего | `**Verdict:** APPROVED`, `CHANGES_REQUESTED` или `REJECTED` |
-| `tester` | пишет и запускает тесты | `test-report.md` | только тестовые файлы | `**Result:** PASS` или `FAIL` |
-| `verifier` | итоговая проверка: требования, тесты, ревью вместе | `verification.md` | ничего | `**Verdict:** APPROVED` или `CHANGES_REQUESTED` |
-| `observer` | готовит заготовку отчёта по предоставленным человеком данным | `observation.md` | только объявленный вход и результаты этапа | — |
-| `spec-checker`, `design-checker`, `qa-checker` | агенты-проверяющие для `check: kind: agent` в конфиге этапа: проверяют результат этапа по чек-листу и выносят заключение | `spec-check.md`, `design-check.md`, `qa-check.md` | ничего | `**Verdict:** PASSED` или `FAILED` |
-| `deployer` | не модель: контроллер строит delivery-план и после подтверждения доставляет | `delivery-plan.json` | коммит, push, PR | — |
-| `cicd-deploy` | не модель: контроллер ждёт мержа PR, проверяет его через Git, запускает CI/CD-сборку (TeamCity) вершины ветки и ждёт результата | `deploy/build.link` | сборка и выкладка во внешнем CI/CD | — |
+| `intent` | `bo` | человек | `approve` | бизнес-идея и разрешение двигаться дальше |
+| `product_spec` | `po` | человек с агентом `analyst` | `md` | цели, требования, критерии приёмки; проверки spec-checker и подтверждение |
+| `tech_design` | `architect` | агент `architect` | `md` | дизайн и задачи; проверки verifier и подтверждение |
+| `implementation` | `developer` | агент `coder` | `link` (`pr`) | код, unit-тесты, `coder.diff`, `unit-test-report.md` и PR через контроллер |
+| `code_review` | `reviewer` | человек с агентом `reviewer` | `md` | ревью на соответствие спецификации |
+| `qa` | `qa` | человек с агентом `tester` | `md` | тесты и отчёт |
+| `deploy` | `deployer` | контроллер (`cicd-deploy`) | `link` (`build`) | ожидание мержа и выкладка через TeamCity |
+| `observation` | `deployer` | человек с агентом `observer` | `md` | наблюдение после выкладки |
+| `acceptance` | `bo` | человек | `approve` | окончательная готовность |
+
+Короткий сценарий `bugfix` берёт только `code_review → implementation → qa` и
+связывает два графа (`bug-triage`, `bug-fix`). Различия профилей и сценариев —
+в [Конфигурации](config.md#профили-init) и
+[руководстве по workflows](../guides/workflows.md).
+
+### Кто из агентов что делает
+
+Имена агентов — из `agents/<имя>/def.yaml`; одно и то же имя может работать на
+нескольких этапах, а этап может быть без агента (чисто человеческий или
+контроллерный).
+
+| Агент | Что делает | Что пишет | Вердикт |
+|---|---|---|---|
+| `analyst` | превращает задачу в proposal: цели, требования, открытые вопросы и критерии приёмки; в терминале может задавать вопросы | `proposal.md` | — |
+| `architect` | пишет техническую спецификацию и дизайн на основе согласованного proposal | `specs/spec.md`, `design.md`, `tasks.md` | — |
+| `coder` | пишет код и unit-тесты по дизайну на этапе `implementation` | `coder.diff`, `unit-test-report.md` и изменения в проекте | `**Result:** PASS` или `**Result:** FAIL` — последняя строка `unit-test-report.md` |
+| `reviewer` | проверяет код на соответствие спецификации | `review.md` | `**Verdict:** APPROVED`, `CHANGES_REQUESTED` или `REJECTED` |
+| `tester` | пишет и запускает тесты | `test-report.md` | `**Result:** PASS` или `FAIL` |
+| `verifier` | итоговая проверка: требования, тесты, ревью вместе | `verification.md` | `**Verdict:** APPROVED` или `CHANGES_REQUESTED` |
+| `observer` | готовит заготовку отчёта по предоставленным человеком данным | `observation.md` | — |
+| `spec-checker`, `design-checker`, `qa-checker` | агенты-проверяющие: проверяют результат этапа по чек-листу | `spec-check.md`, `design-check.md`, `qa-check.md` | `**Verdict:** PASSED` или `FAILED` |
+| `deployer` / `cicd-deploy` | не модель: контроллер строит delivery-план и доставляет; `cicd-deploy` дополнительно ждёт мержа и запускает сборку | `delivery-plan.json`, `deploy/build.link` | — |
+
+Контракт `coder` (COD-02) строгий: один diff в рабочей копии успехом не
+считается — обязательны оба атрибутированных выхода. `coder.diff` — валидный
+unified diff с заголовками `---`/`+++` и хотя бы одним hunk; `unit-test-report.md`
+заканчивается ровно одной строкой `**Result:** PASS` или `**Result:** FAIL`.
+Контроллер читает именно этот маркер, а не свободный текст. PR-ссылка в
+`outputs` агента не объявляется: commit, push и PR делает только контроллер
+после подтверждения точного SHA-256 плана, а ссылка проверяется гейтом на
+этапе `implementation`.
 
 Документы этапов лежат в `.ai-team/artifacts/<feature>/`. Тестовыми файлами
 для `tester` считаются `**/*_test.go`, `**/testdata/**`, `test/**`,
@@ -104,7 +133,11 @@ analyst → architect → coder → reviewer → tester → verifier → deploye
   объединено с подтверждением delivery;
 - **запускает проверки** (`checks`) из конфига этапа и читает их результат по
   типу: код выхода, `go test -json` или JUnit XML;
+- **проверяет входные гейты** до вызова исполнителя (`entry_gate_groups`,
+  схема v7): вердикт-только, без human gate; провал блокирует запуск этапа;
 - **читает вердикт** и выбирает переход по графу `workflow`;
+- **закрепляет определения гейтов**: на старте run в evidence пишутся точные
+  ID, версии, виды и SHA-256 определений, а при resume сверяются с библиотекой;
 - **записывает доказательства**: неизменяемые манифесты попыток и цепочку
   событий в `.ai-team/runs/<run_id>/`.
 
@@ -117,10 +150,13 @@ analyst → architect → coder → reviewer → tester → verifier → deploye
 Человек нужен в двух местах.
 
 **Подтверждения переходов.** В конфиге у перехода может быть `approval`: роли,
-кворум и действия. В профилях `standard` и `fast` подтверждения переходов
-вперёд отложены (`deferred: true`) и решаются одним разом вместе с delivery.
-В `regulated` каждый переход ждёт человека сразу. Если ревьюер вернул работу,
-вам предлагают выбор:
+кворум и действия. Решение COD-04: в профилях `standard` и `fast`
+подтверждения переходов вперёд отложены (`deferred: true`) и аттестуются
+отдельным approval с точным subject, но разрешаются одним консолидированным
+delivery-решением. Роль и кворум отдельного перехода в этом случае
+осознанно заменяются единым delivery-контрпоинтом. В `regulated` каждый
+переход ждёт человека сразу. Повтор прохода с тем же subject не создаёт новое
+ожидание. Если ревьюер вернул работу, вам предлагают выбор:
 
 | Действие | Что произойдёт |
 |---|---|
@@ -164,4 +200,5 @@ delivery: гарантии дают только проверки из конф�
 
 - [Статусы и коды выхода](statuses.md) — чем заканчивается прогон и что делать.
 - [Конфигурация](config.md) — как поменять этапы, переходы и проверки.
+- [Workflows](../guides/workflows.md) — сценарии, графы и цепочки гейтов.
 - [Граница безопасности](security.md) — что ai-team гарантирует, а что нет.

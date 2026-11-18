@@ -1522,6 +1522,8 @@ func (s *workerAPIServer) dispatchContext(ctx context.Context, method string, c 
 // bind, so a forged pin list cannot enter the durable log. The pinned config
 // snapshot is verified against the controller's lifecycle digest before it is
 // used, which keeps the fail-closed digest comparison across restarts intact.
+// The template is copied verbatim from the pinned config; a legacy/in-memory
+// config has no template and is recorded as the honest empty string.
 func (s *workerAPIServer) controllerGatePinsEvent(runID string, at time.Time) (evidence.Event, error) {
 	state, err := s.lifecycle.Load(runID)
 	if err != nil {

@@ -253,14 +253,16 @@ func validateAutoCheckRetryEvent(events []Event, candidate Event) error {
 // typed. It is an extension event replay ignores, so the ordinary worker
 // append boundary rejects it; only the trusted controller path may write it,
 // and even there the payload must be exactly the pin manifest the controller
-// derived from its pinned config.
+// derived from its pinned config. The template field must be present as a
+// string; an empty string is the honest representation of a legacy config
+// that has no template, so it is accepted, but a missing or non-string value
+// is still rejected.
 func validateGatePinsEvent(candidate Event) error {
 	if candidate.Stage != "" || candidate.AttemptID != "" {
 		return errors.New("gate_pins_recorded must not bind a stage or attempt")
 	}
-	template, ok := candidate.Data["template"].(string)
-	if !ok || template == "" {
-		return errors.New("gate_pins_recorded requires a template")
+	if _, ok := candidate.Data["template"].(string); !ok {
+		return errors.New("gate_pins_recorded requires a string template")
 	}
 	rawPins, ok := candidate.Data["pins"].([]any)
 	if !ok || len(rawPins) == 0 {

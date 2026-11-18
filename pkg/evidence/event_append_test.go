@@ -40,9 +40,17 @@ func TestGatePinsAppendIsControllerOwned(t *testing.T) {
 	if _, _, err := ValidateControllerEventAppend(events, runID, store.RunDir(), candidate, sequence, previous, FilesystemAttemptManifestSource()); err != nil {
 		t.Fatalf("controller gate pins append rejected: %v", err)
 	}
+	// A legacy config has no template; the honest empty string is accepted as
+	// long as the key is present and typed as a string.
+	legacy := candidate
+	legacy.Data = map[string]any{"template": "", "pins": payload["pins"]}
+	if _, _, err := ValidateControllerEventAppend(events, runID, store.RunDir(), legacy, sequence, previous, FilesystemAttemptManifestSource()); err != nil {
+		t.Fatalf("controller rejected legacy gate pins with empty template: %v", err)
+	}
 	for name, data := range map[string]map[string]any{
-		"missing template": {"pins": payload["pins"]},
-		"empty pins":       {"template": "fixture", "pins": []any{}},
+		"missing template":    {"pins": payload["pins"]},
+		"non-string template": {"template": 123, "pins": payload["pins"]},
+		"empty pins":          {"template": "fixture", "pins": []any{}},
 		"bad digest": {"template": "fixture", "pins": []any{map[string]any{
 			"gate": "required_sections", "version": float64(1), "kind": "builtin", "digest": "short",
 		}}},

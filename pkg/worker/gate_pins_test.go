@@ -19,9 +19,15 @@ import (
 // gatePinsFixture is a controller-owned config snapshot with exactly one
 // pinned gate definition, matching what the pipeline records at task start.
 func gatePinsFixture(t *testing.T, runID, target string) (json.RawMessage, []workflow.GatePin, evidence.EventLog) {
+	return gatePinsFixtureWithTemplate(t, runID, target, "gate-pins-fixture")
+}
+
+// gatePinsFixtureWithTemplate builds a controller-owned config snapshot with
+// the given template. An empty template models a legacy/in-memory config.
+func gatePinsFixtureWithTemplate(t *testing.T, runID, target, template string) (json.RawMessage, []workflow.GatePin, evidence.EventLog) {
 	t.Helper()
 	cfg := config.Config{
-		Template: "gate-pins-fixture",
+		Template: template,
 		Stages: []config.TemplateStage{{
 			ID: "writer",
 			ExitGateGroups: workflow.GateGroups{{
@@ -138,6 +144,67 @@ func TestWorkerAPIGatePinsAreControllerOwned(t *testing.T) {
 	})
 	if err != nil || retry.(workerAPIEventAppendResult).SHA256 != receipt.SHA256 {
 		t.Fatalf("gate pin retry: result=%+v err=%v", retry, err)
+	}
+}
+
+func TestWorkerAPIGatePinsLegacyConfigRecordsEmptyTemplate(t *testing.T) {
+	const runID = "gate-pins-legacy"
+	target := t.TempDir()
+	// A legacy/in-memory config has no template; its honest value is the empty
+	// string, which the controller must be able to record.
+	snapshot, pins, log := gatePinsFixtureWithTemplate(t, runID, target, "")
+	startGatePinsStore(t, runID, target, snapshot, log)
+	states, err := lifecycle.NewStore(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	startedAt := time.Date(2026, 11, 18, 10, 0, 0, 0, time.UTC)
+	events, err := log.Read(runID)
+	if err != nil || len(events) != 1 {
+		t.Fatalf("fixture log: events=%d err=%v", len(events), err)
+	}
+	server := &workerAPIServer{
+		scope:        workerAPIScope{RunID: runID, Operation: OperationStart, TargetDir: target},
+		usageAllowed: true, eventLogs: log, lifecycle: states,
+	}
+
+	// The generic worker append boundary stays closed for extension events,
+	// even for a legacy config with an empty template.
+	forged := evidence.Event{
+		Type: workerGatePinsEventType, Timestamp: startedAt.Add(time.Second),
+		Data: map[string]any{"template": "", "pins": []any{}},
+	}
+	if _, err := server.dispatch("event_log.append", workerAPICall{
+		RunID: runID, Event: forged, ExpectedSequence: 1, ExpectedPreviousSHA256: events[0].SHA256,
+	}); err == nil || !strings.Contains(err.Error(), "not allowed through worker API") {
+		t.Fatalf("generic worker append accepted gate pins: %v", err)
+	}
+
+	// The controller path records the honest empty template and verified pins.
+	result, err := server.dispatch("event_log.gate_pins", workerAPICall{
+		RunID: runID, Event: evidence.Event{Timestamp: startedAt.Add(time.Second)},
+		ExpectedSequence: 1, ExpectedPreviousSHA256: events[0].SHA256,
+	})
+	if err != nil {
+		t.Fatalf("controller gate pin append for legacy config: %v", err)
+	}
+	if result.(workerAPIEventAppendResult).Sequence != 2 {
+		t.Fatalf("gate pin receipt=%+v", result)
+	}
+	stored, err := log.Read(runID)
+	if err != nil || len(stored) != 2 {
+		t.Fatalf("stored log: events=%d err=%v", len(stored), err)
+	}
+	if template, present := stored[1].Data["template"]; !present || template != "" {
+		t.Fatalf("legacy template not recorded honestly: %+v", stored[1].Data)
+	}
+	recorded, _ := stored[1].Data["pins"].([]any)
+	if len(recorded) != 1 {
+		t.Fatalf("recorded pins=%+v", recorded)
+	}
+	pin, _ := recorded[0].(map[string]any)
+	if pin["gate"] != pins[0].Gate || pin["digest"] != pins[0].Digest {
+		t.Fatalf("recorded pin=%+v want %+v", pin, pins[0])
 	}
 }
 

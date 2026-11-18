@@ -47,7 +47,19 @@ func (e *TrustedConfigError) Error() string {
 // web publication cannot vouch for itself. Without a file configuration the
 // trusted baseline is empty: a template with commands or infrastructure is
 // refused, one without them runs.
+//
+// An explicit `template audit --rewrite` is a separate, operator-gated anchor:
+// it records a review of these exact bytes (template_provenance.go) and lets
+// them run. It is the same decision as editing config.yaml by hand, scoped to
+// the reviewed version only; no other version or web publication is affected.
 func (s *TemplateStore) RequireTrusted(data []byte, subject string) error {
+	trusted, err := s.isTrustedVersion(data)
+	if err != nil {
+		return fmt.Errorf("%s: %w", subject, err)
+	}
+	if trusted {
+		return nil
+	}
 	anchor, err := s.anchor()
 	if err != nil {
 		return fmt.Errorf("%s: %w", subject, err)

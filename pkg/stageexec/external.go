@@ -296,7 +296,32 @@ func (e *External) Execute(ctx context.Context, request Request) (Result, error)
 	if request.WorkDir == "" {
 		return result, errors.New("stage executor: workdir обязателен")
 	}
+	// A host program runs directly in request.WorkDir, so a symlink there
+	// would let it execute in a tree the repository guard never inspected.
+	// Pin the root (EvalSymlinks, refuse a symlinked final component) and run
+	// the same git guard as the container adapter before any process starts.
+	// The container adapter pins its own repository mount inside its launcher.
+	workDir := request.WorkDir
+	host := e.spec.Docker == nil
+	var pinned safeio.PinnedRoot
+	if host {
+		pin, err := safeio.PinRoot(workDir)
+		if err != nil {
+			return result, fmt.Errorf("stage executor: workdir: %w", err)
+		}
+		pinned = pin
+		workDir = pin.Real()
+		if err := checkRepoGitMetadata(workDir); err != nil {
+			return result, fmt.Errorf("stage executor: репозиторий: %w", err)
+		}
+	}
+
 	doc := newRequestDocument(request)
+	if host {
+		// The process must see the exact tree that was checked, not the
+		// caller's spelling with an ancestor symlink (e.g. /var on macOS).
+		doc.WorkDir = workDir
+	}
 	stdin, err := jsonMarshal(doc)
 	if err != nil {
 		return result, fmt.Errorf("stage executor: сериализация запроса: %w", err)
@@ -310,8 +335,16 @@ func (e *External) Execute(ctx context.Context, request Request) (Result, error)
 	started := time.Now()
 	provenance := map[string]string{}
 	staged := map[string][]byte{}
+	// Re-check immediately before the launcher starts the process: if the
+	// root was replaced after the guard ran, do not launch anything (fail
+	// closed). This mirrors the container launcher's re-verify before mount.
+	if host {
+		if err := pinned.Verify(); err != nil {
+			return result, fmt.Errorf("stage executor: workdir изменён после проверки: %w", err)
+		}
+	}
 	runErr := e.launcher.Run(runCtx, Launch{
-		Argv: e.spec.Argv, Dir: request.WorkDir, Env: env, Stdin: stdin, Stdout: stdout, Stderr: stderr,
+		Argv: e.spec.Argv, Dir: workDir, Env: env, Stdin: stdin, Stdout: stdout, Stderr: stderr,
 		Request: request, Provenance: provenance, StagedFiles: staged,
 	})
 	if len(provenance) > 0 {

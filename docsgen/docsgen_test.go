@@ -122,11 +122,13 @@ func TestBuildEndToEnd(t *testing.T) {
 	}
 
 	// Screenshots referenced from the pages are copied next to them.
-	if _, err := os.Stat(filepath.Join(out, "start", "assets", "screens", "pipeline.png")); err != nil {
-		// Copies land relative to the page URL, mirroring the source layout.
-		matches, _ := filepath.Glob(filepath.Join(out, "*", "*", "screens", "pipeline.png"))
-		if len(matches) == 0 {
-			t.Errorf("screenshot pipeline.png not copied into the site: %v", err)
+	for _, name := range []string{"task-awaiting-decision.png", "task-completed.jpg"} {
+		if _, err := os.Stat(filepath.Join(out, "start", "assets", "screens", name)); err != nil {
+			// Copies land relative to the page URL, mirroring the source layout.
+			matches, _ := filepath.Glob(filepath.Join(out, "*", "*", "screens", name))
+			if len(matches) == 0 {
+				t.Errorf("screenshot %s not copied into the site: %v", name, err)
+			}
 		}
 	}
 

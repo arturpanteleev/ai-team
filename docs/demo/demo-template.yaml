@@ -10,10 +10,14 @@ workflow: idea-to-prod
 stall_after: 24h
 
 # Два workflow в каталоге: исходный SDLC и короткий bugfix на базе fast.
-# У bugfix свои два графа (триаж → исправление), входной гейт маркера вердикта
-# и выходной гейт решения человека; поля model в workflow нет — модель живёт
-# на агентах и executor_adapters. Старые задачи закреплены на своей версии
-# шаблона и продолжают идти по записанному в ней workflow.
+# У bugfix свои два графа (триаж → исправление) с явным поднабором этапов:
+# compiled-граф задачи начинается с code_review и идёт только через
+# implementation и qa, а не через все девять этапов SDLC. Входных гейтов у
+# workflow нет (вердикт проверяется гейтами конкретного этапа), а выходной гейт
+# решения человека не дублируется там, где решение уже объявлено на этапе.
+# Поля model в workflow нет — модель живёт на агентах и executor_adapters.
+# Старые задачи закреплены на своей версии шаблона и продолжают идти по
+# записанному в ней workflow.
 workflows:
   - id: idea-to-prod
     title: От идеи до продакшена
@@ -34,16 +38,14 @@ workflows:
         title: Исправление
         template: idea-to-prod
         entry: implementation
+        stages: [implementation, qa]
       - id: bug-triage
         title: Триаж дефекта
         template: idea-to-prod
         entry: code_review
+        stages: [code_review]
         transitions:
           - {from: bug-triage, to: bug-fix, on: passed}
-    entry_gate_groups:
-      - - gate: verdict_marker
-          version: 1
-          name: bug_report_verdict
     exit_gate_groups:
       - - gate: human_approval
           version: 2

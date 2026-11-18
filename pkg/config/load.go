@@ -94,12 +94,25 @@ func builtinSDLCWorkflow(template string) WorkflowMeta {
 }
 
 // builtinBugfixWorkflow is the second built-in scenario. It is deliberately
-// not a copy of idea-to-prod: the task starts at review/fix instead of product
-// discovery, declares two connected graphs instead of one, and uses its own
-// entry/exit gate chains instead of inheriting the SDLC gates. The short path
-// follows the fast profile (no manual confirmations on the stage itself).
+// not a copy of idea-to-prod: the task starts at the review/fix stages instead
+// of product discovery, declares two connected graphs with an explicit subset
+// of template stages instead of the full SDLC path, and carries its own exit
+// gate chain instead of inheriting the SDLC gates. The short path follows the
+// fast profile (no manual confirmations on the stage itself).
+//
+// There is no workflow-wide entry chain: entry gates run on every stage of a
+// graph, and a workflow-level verdict_marker would block the triage stage,
+// which has no verdict input. Entry gates stay stage-scoped, where the input
+// contract is known. A workflow-wide human_approval stays as a fallback for
+// stages without their own decision; ExitGateGroupsFor drops it when the
+// stage already declares a human gate.
 func builtinBugfixWorkflow(template string) WorkflowMeta {
+	// The legacy in-memory graph uses short stage names; a v7 template uses
+	// the stable template ids. The graph subset must name stages that exist in
+	// the config it is attached to, including when a legacy config is migrated.
+	triageStage, fixStage, verifyStage := "code_review", "implementation", "qa"
 	if template == "" {
+		triageStage, fixStage, verifyStage = "reviewer", "coder", "tester"
 		template = DefaultWorkflowID
 	}
 	return WorkflowMeta{
@@ -110,14 +123,18 @@ func builtinBugfixWorkflow(template string) WorkflowMeta {
 		Extends:     DefaultWorkflowID,
 		Graphs: []WorkflowGraph{
 			// The target graph is declared first: transitions may only point at
-			// graphs that are already declared (see validateWorkflows).
-			{ID: BugfixFixGraphID, Title: "Исправление", Template: template, Entry: "coder"},
-			{ID: BugfixTriageGraphID, Title: "Триаж дефекта", Template: template, Entry: "reviewer",
-				Transitions: []WorkflowGraphTransition{{From: BugfixTriageGraphID, To: BugfixFixGraphID, On: "passed"}}},
+			// graphs that are already declared (see validateWorkflows). The
+			// stage ids are the v7 template ids, not the legacy in-memory ones.
+			{
+				ID: BugfixFixGraphID, Title: "Исправление", Template: template,
+				Entry: fixStage, Stages: []string{fixStage, verifyStage},
+			},
+			{
+				ID: BugfixTriageGraphID, Title: "Триаж дефекта", Template: template,
+				Entry: triageStage, Stages: []string{triageStage},
+				Transitions: []WorkflowGraphTransition{{From: BugfixTriageGraphID, To: BugfixFixGraphID, On: "passed"}},
+			},
 		},
-		EntryGateGroups: workflow.GateGroups{{workflow.GateRef{
-			Gate: gatelib.GateVerdictMarker, Version: 1, Name: "bug_report_verdict",
-		}}},
 		ExitGateGroups: workflow.GateGroups{{workflow.GateRef{
 			Gate: gatelib.GateHumanApproval, Version: 2, Name: "hotfix_approval",
 			Params: map[string]any{"on_reject": gatelib.OnRejectStay},

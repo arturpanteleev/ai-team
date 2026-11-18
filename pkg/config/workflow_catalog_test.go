@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -52,11 +53,18 @@ func TestDefaultCatalogCarriesTwoWorkflowsWithoutModelField(t *testing.T) {
 	if len(sdlc.EntryGateGroups.Refs()) != 0 || len(sdlc.ExitGateGroups.Refs()) != 0 {
 		t.Fatalf("SDLC workflow must keep its empty gate chains: %+v", sdlc)
 	}
-	if got := strings.Join(refsOf(bugfix.EntryGateGroups), ","); got != "verdict_marker@1:bug_report_verdict" {
-		t.Fatalf("bugfix entry gates: %s", got)
+	// A workflow entry chain would run on every stage, including stages with
+	// no verdict input, so the second scenario keeps entry gates stage-scoped.
+	if len(bugfix.EntryGateGroups.Refs()) != 0 {
+		t.Fatalf("bugfix must not declare workflow-wide entry gates: %s", refsOf(bugfix.EntryGateGroups))
 	}
 	if got := strings.Join(refsOf(bugfix.ExitGateGroups), ","); got != "human_approval@2:hotfix_approval" {
 		t.Fatalf("bugfix exit gates: %s", got)
+	}
+	// The in-memory default uses legacy short stage names; the v7 demo uses
+	// template ids. Both must be a short triage → fix → verify path.
+	if got := strings.Join(bugfix.Graphs[1].Stages, ",") + "→" + strings.Join(bugfix.Graphs[0].Stages, ","); got != "reviewer→coder,tester" {
+		t.Fatalf("bugfix graph stage subsets must form a short run path, got %s", got)
 	}
 
 	// A workflow is a set of graphs, not a model: no field may declare a model.
@@ -122,8 +130,8 @@ func TestDemoTemplatePublishesBothWorkflowsWithDifferentChains(t *testing.T) {
 	if len(sdlc.Refs()) != 0 {
 		t.Fatalf("SDLC workflow has no workflow-level gates: %v", refsOf(sdlc))
 	}
-	if got := strings.Join(refsOf(bugfixEntry), ","); got != "verdict_marker@1:bug_report_verdict" {
-		t.Fatalf("demo bugfix entry gates: %s", got)
+	if len(bugfixEntry.Refs()) != 0 {
+		t.Fatalf("demo bugfix must not declare workflow-wide entry gates: %s", refsOf(bugfixEntry))
 	}
 	if got := strings.Join(refsOf(bugfixExit), ","); got != "human_approval@2:hotfix_approval" {
 		t.Fatalf("demo bugfix exit gates: %s", got)
@@ -132,6 +140,13 @@ func TestDemoTemplatePublishesBothWorkflowsWithDifferentChains(t *testing.T) {
 		if meta.ID == BugfixWorkflowID && (len(meta.Graphs) != 2 || meta.Graphs[0].Entry == meta.Graphs[1].Entry) {
 			t.Fatalf("bugfix graph entries must differ: %+v", meta.Graphs)
 		}
+	}
+	plan, err := cfg.workflowGraphPlan(*cfg.workflowByID(BugfixWorkflowID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(plan.stageIDs, ",") + "@" + plan.entry; got != "code_review,implementation,qa@code_review" {
+		t.Fatalf("demo bugfix graph chain: %s", got)
 	}
 }
 
@@ -175,21 +190,22 @@ func TestBugfixTaskCompilesAndTravelsItsGraph(t *testing.T) {
 		}
 		current = edge.To
 	}
-	if len(visited) == 0 || visited[0] != "intent" {
-		t.Fatalf("bugfix run must have a declared entry: %v", visited)
+	if got := fmt.Sprint(visited); got != "[code_review implementation qa]" {
+		t.Fatalf("bugfix run must travel only its declared stage subset: %v", visited)
 	}
 
-	// The workflow chain is part of the compiled graph: with bugfix active the
-	// forward edges carry the human_approval gate of the bugfix exit chain.
-	stage, ok := bugfixGraph.Node("product_spec")
+	// The workflow chain is part of the compiled graph: a stage without its own
+	// human gate receives the bugfix exit gate, while a stage that already has
+	// one keeps only its own decision.
+	stage, ok := bugfixGraph.Node("implementation")
 	if !ok {
-		t.Fatal("demo stage product_spec missing from graph")
+		t.Fatal("demo stage implementation missing from graph")
 	}
 	passed, ok := bugfixGraph.Edge(stage.Key(), workflow.OutcomePassed)
 	if !ok || passed.Approval == nil {
 		t.Fatalf("bugfix exit gate must compile into an approval: %+v", passed)
 	}
-	groups, err := bugfix.ExitGateGroupsFor(base.Stages[1])
+	groups, err := bugfix.ExitGateGroupsFor(stageFromTemplate(base, "implementation"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,6 +218,30 @@ func TestBugfixTaskCompilesAndTravelsItsGraph(t *testing.T) {
 	if !found {
 		t.Fatalf("bugfix human decision lost at stage: %v", refsOf(groups))
 	}
+	// code_review declares reviewer_approval itself: the workflow's
+	// hotfix_approval must not ask for a second decision on the same edge.
+	reviewGroups, err := bugfix.ExitGateGroupsFor(stageFromTemplate(base, "code_review"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	humans := 0
+	for _, ref := range reviewGroups.Refs() {
+		if ref.Gate == gatelib.GateHumanApproval {
+			humans++
+		}
+	}
+	if humans != 1 {
+		t.Fatalf("stage with its own human gate must not get workflow human gate twice: %v", refsOf(reviewGroups))
+	}
+}
+
+func stageFromTemplate(cfg *Config, id string) TemplateStage {
+	for _, stage := range cfg.Stages {
+		if stage.ID == id {
+			return stage
+		}
+	}
+	panic("stage not found: " + id)
 }
 
 func TestIdeaToProdStillCompilesWithoutWorkflowsBlock(t *testing.T) {

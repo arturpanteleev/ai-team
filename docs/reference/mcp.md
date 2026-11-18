@@ -190,9 +190,12 @@ codex exec "вызови ai-team whoami"
 | `list_workflows` | `GET /api/workflows` | каталог сценариев (`idea-to-prod`, `bugfix` и добавленные проектом) |
 | `get_workflow` | `GET /api/workflows/{workflowID}` | карточку сценария: графы, цепочки гейтов и задачи |
 
-Все четыре — `readOnlyHint`, принимают `limit`/`offset` для списков и
-`byte_offset` для больших ответов. Граф задачи и статусы этапов также доступны
-через `get_task_workflow`, `get_task_template_version` и
+Все четыре — `readOnlyHint` и принимают `byte_offset` для больших ответов
+(см. [Размер ответов и пагинация](#размер-ответов-и-пагинация)). У этих инструментов
+нет локальной пагинации массивов: `limit`/`offset` доступны только у инструментов
+с такой пагинацией (например, `list_projects` или `list_template_versions`), а передача
+`limit` или `offset` сюда приведёт к ошибке `unknown argument`. Граф задачи и статусы
+этапов также доступны через `get_task_workflow`, `get_task_template_version` и
 `get_task_stage_statuses` (см. таблицу выше).
 
 Пятый инструмент — действие `patch_workflow_process`
